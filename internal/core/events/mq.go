@@ -45,4 +45,3 @@ func (m *MQ) Emit(ctx context.Context, e Envelope) error {
 		},
 	)
 }
-

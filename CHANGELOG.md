@@ -5,6 +5,89 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] — 2026-03-17
+
+### Added
+
+#### Integrations layer (`internal/integrations/`)
+
+- New `integrations/` layer between `platform/` and `engines/` for the
+  catalog of governed systems and the runtime registry of adapters that
+  serve them.
+- `integrations/applications/` — `Application` domain entity (bun model
+  on Postgres) with CRUD service, partial-patch payloads, REST handlers
+  under `/api/v0/applications`, decommission flow that emits
+  `inventory.application.decommissioned`, and a matching helper that
+  surfaces eligible connectors for an application's required tag set.
+- `integrations/connectors/` — `ConnectorInstance` registry,
+  `CapabilityDescriptor` (operations, status transitions, supported
+  fact kinds, account-disable cascades), pure tag-set `Selector`,
+  `RegistrationConsumer` (durable topic consumer for self-registration
+  and heartbeat messages), and REST handlers under
+  `/api/v0/connector-instances`. Online window: 2 minutes; stale
+  cutoff: 24 hours.
+- Connector-specific `RPCClient` over the generic AMQP request/reply
+  primitive: encodes the connector command shape (correlation_id,
+  reply_exchange / reply_routing_key, operation, payload, optional
+  trace fields, `result_storage_requested`); decodes the response
+  envelope; handles non-ok status as typed `*ErrRPCStatus`; pulls large
+  results out of the data lake via a `LakeReader` adapter when the
+  remote peer returns `result_storage_ref`.
+
+#### Core additions (`internal/core/`)
+
+- `core/correlation/` — `X-Correlation-ID` carrier on `context.Context`
+  with `WithID` / `ID` / `Ensure` helpers, mirroring the kernel
+  `ContextVar` contract so service code can stamp events / log entries
+  / RPC calls with one trace id.
+- `core/webserver/` — `X-Correlation-ID` HTTP middleware: echoes the
+  header when present, generates a fresh UUID v4 otherwise, attaches
+  to the request context, propagates into slog access logs.
+- `core/rabbitmq/rpc_client.go` — generic AMQP request/reply primitive.
+  Opens its own dedicated channel on the shared `*amqp.Connection`,
+  declares the responses exchange and a private exclusive auto-delete
+  reply queue, correlates outgoing publishes with incoming replies by
+  `correlation_id`, surfaces explicit timeouts (default 60 s), and
+  exposes `ReplyTarget()` so protocol wrappers can encode the reply
+  target into the command body when the wire shape requires it.
+
+#### Migration tooling
+
+- `internal/migrations/` — central bun migration registry
+  (`migrations.Migrations`). Schemas land as raw SQL inside Go
+  migration files so future model edits do not retroactively change
+  historical migrations.
+- Initial migrations: `applications` and `connector_instances` tables
+  with the same column shape, indexes, and unique constraints as the
+  kernel originals.
+- `cmd/migrate/` — stand-alone runner with `init` / `up` / `down` /
+  `status` commands. Reuses the same secret store as backplane.
+- Makefile targets: `migrate-init`, `migrate-up`, `migrate-down`,
+  `migrate-status`.
+
+### Changed
+
+- `cmd/backplane/main.go` — composition root now wires the
+  integrations layer end-to-end: applications + connectors
+  repositories, the connector RPC client, the registration consumer
+  goroutine, the `/api/v0` router group, and the cross-slice
+  `applications.MatchingProvider` adapter.
+- `internal/core/config/rabbitmq.go` — adds
+  `connector_registration_exchange` (default `aurelion.connectors.registry`)
+  and `connector_registration_queue` (default `aurelion.connectors.registration`).
+- `internal/core/webserver/webserver.go` — installs the
+  correlation-id middleware and threads `correlation_id` into every
+  access-log line.
+
+### Fixed
+
+- `integrations/applications/Repository.List` and
+  `integrations/connectors/Repository.{List,ListOnline}` return a
+  non-nil empty slice on empty result sets so JSON encoders emit `[]`
+  instead of `null` — clients that pin to array shape (typed
+  `ApplicationFromApi[]` / `ConnectorInstanceFromApi[]`) no longer
+  crash on first refresh of an empty registry.
+
 ## [0.1.0] — 2026-03-13
 
 Initial bootstrap skeleton of `aurelion-backplane`: a single-process Go

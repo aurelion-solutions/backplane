@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/aurelion-solutions/backplane/internal/core/correlation"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 )
@@ -35,6 +36,7 @@ func New(cfg Config, log *slog.Logger) *echo.Echo {
 
 	e.Use(middleware.Recover())
 	e.Use(middleware.RequestID())
+	e.Use(correlationIDMiddleware())
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
 		AllowOrigins: cfg.CORSAllowOrigins,
 	}))
@@ -53,11 +55,13 @@ func slogRequestLogger(log *slog.Logger) echo.MiddlewareFunc {
 			err := next(c)
 			req := c.Request()
 			res := c.Response()
+			cid, _ := correlation.ID(req.Context())
 			log.Info("http",
 				slog.String("method", req.Method),
 				slog.String("path", req.URL.Path),
 				slog.Int("status", res.Status),
 				slog.String("request_id", res.Header().Get(echo.HeaderXRequestID)),
+				slog.String("correlation_id", cid),
 			)
 			return err
 		}

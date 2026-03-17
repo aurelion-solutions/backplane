@@ -6,12 +6,14 @@
 // aurelion-backplane service. Wiring order:
 //
 //	envvars → secret.Factory → secret.Manager → config.Settings →
-//	logger → postgres.DB → rabbitmq.Conn → webserver → serve.
+//	logger → postgres.DB → rabbitmq.Conn → events sink → storage →
+//	siem → llm → connector RPC client → registration consumer →
+//	webserver → serve.
 //
 // Each factory fails fast: an unreachable dependency at startup aborts
 // the boot with a non-zero exit. Hexagonal-style: domain packages
-// (yet to be written) will receive their infra dependencies through
-// constructor functions called from here, not via globals.
+// receive their infra dependencies through constructor functions
+// called from here, not via globals.
 package main
 
 import (
@@ -31,6 +33,8 @@ import (
 	"github.com/aurelion-solutions/backplane/internal/core/postgres"
 	"github.com/aurelion-solutions/backplane/internal/core/rabbitmq"
 	"github.com/aurelion-solutions/backplane/internal/core/webserver"
+	"github.com/aurelion-solutions/backplane/internal/integrations/applications"
+	"github.com/aurelion-solutions/backplane/internal/integrations/connectors"
 	"github.com/aurelion-solutions/backplane/internal/platform/llm"
 	"github.com/aurelion-solutions/backplane/internal/platform/secretmanagers"
 	"github.com/aurelion-solutions/backplane/internal/platform/siem"
@@ -66,6 +70,7 @@ func printBanner() {
 	fmt.Println()
 	fmt.Printf("  HTTP listening on %s\n", httpAddr)
 	fmt.Printf("  curl localhost%s/healthz\n", httpAddr)
+	fmt.Printf("  curl localhost%s/api/v0/applications\n", httpAddr)
 	fmt.Println()
 }
 
@@ -80,9 +85,6 @@ func run(log *slog.Logger) error {
 	providerName := envOr("AURELION_SECRET_PROVIDER", "file")
 	secretsFile := envOr("AURELION_SECRETS_FILE", ".secrets.json")
 
-	// Secret factory: register every known provider here. file is real;
-	// vault / openbao / akeyless / conjur are stubs until their backend
-	// is implemented in internal/platform/secretmanagers/.
 	sf := secretmanagers.NewFactory()
 	secretmanagers.RegisterFile(sf, secretsFile)
 	secretmanagers.RegisterVault(sf)
@@ -138,6 +140,7 @@ func run(log *slog.Logger) error {
 			{Name: settings.RabbitMQ.LogsExchange, Type: rabbitmq.Topic},
 			{Name: settings.RabbitMQ.ConnectorCommandsExchange, Type: rabbitmq.Direct},
 			{Name: settings.RabbitMQ.ConnectorResponsesExchange, Type: rabbitmq.Direct},
+			{Name: settings.RabbitMQ.ConnectorRegistrationExchange, Type: rabbitmq.Topic},
 		},
 	}
 	var mq *rabbitmq.Conn
@@ -164,7 +167,6 @@ func run(log *slog.Logger) error {
 	defer siem.EmitInfo(context.Background(), bootSink, "backplane", "backplane stopping")
 
 	eventsSink := events.NewMQ(mq.Channel, settings.RabbitMQ.EventsExchange)
-	_ = eventsSink
 	log.Info("events sink ready")
 
 	// Storage factory: file is real; s3 / iceberg are stubs.
@@ -205,8 +207,8 @@ func run(log *slog.Logger) error {
 		}
 		sinks = append(sinks, s)
 	}
-	sink := siem.NewMulti(sinks...)
-	_ = sink
+	siemSink := siem.NewMulti(sinks...)
+	_ = siemSink
 	log.Info("siem selected", slog.Any("providers", siemProviders))
 
 	// LLM factory: every backend is currently a stub. Replace the
@@ -223,10 +225,63 @@ func run(log *slog.Logger) error {
 	_ = llmClient
 	log.Info("llm selected", slog.String("provider", llmProvider))
 
+	// Connector RPC client (generic AMQP request/reply on a dedicated
+	// channel) + the connector-specific protocol wrapper. Reading large
+	// connector responses out of the data lake goes through a small
+	// adapter over the storage factory.
+	rpc := rabbitmq.NewRPCClient(mq.Conn, rabbitmq.RPCClientConfig{
+		ResponsesExchange: settings.RabbitMQ.ConnectorResponsesExchange,
+	})
+	if err := rpc.Start(ctx); err != nil {
+		return fmt.Errorf("connector rpc start: %w", err)
+	}
+	defer func() { _ = rpc.Close() }()
+	log.Info("connector rpc client started",
+		slog.String("client_id", rpc.ClientID()),
+		slog.String("responses_exchange", settings.RabbitMQ.ConnectorResponsesExchange),
+	)
+
+	lakeReader := lakeReaderAdapter{factory: stf}
+	connectorRPC := connectors.NewRPCClient(rpc, lakeReader, settings.RabbitMQ.ConnectorCommandsExchange)
+	_ = connectorRPC // engines pick this up via DI when they materialise
+
+	// Repositories and services for the integrations layer.
+	appsRepo := applications.NewBunRepository(db)
+	appsSvc := applications.NewService(appsRepo, eventsSink, nil)
+
+	connRepo := connectors.NewBunRepository(db)
+	connSvc := connectors.NewService(connRepo, nil)
+
+	// Registration consumer runs in its own goroutine until ctx fires.
+	regChan, err := mq.Conn.Channel()
+	if err != nil {
+		return fmt.Errorf("registration consumer channel: %w", err)
+	}
+	defer func() { _ = regChan.Close() }()
+	go func() {
+		err := connectors.RunRegistrationConsumer(ctx, log, connSvc, connectors.RegistrationConsumerConfig{
+			Channel:     regChan,
+			Exchange:    settings.RabbitMQ.ConnectorRegistrationExchange,
+			Queue:       settings.RabbitMQ.ConnectorRegistrationQueue,
+			BindingKeys: []string{"connector.*"},
+		})
+		if err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("registration consumer terminated", slog.Any("err", err))
+		}
+	}()
+	log.Info("registration consumer running",
+		slog.String("exchange", settings.RabbitMQ.ConnectorRegistrationExchange),
+		slog.String("queue", settings.RabbitMQ.ConnectorRegistrationQueue),
+	)
+
 	e := webserver.New(webserver.Config{
 		Debug:            settings.App.Debug,
 		CORSAllowOrigins: settings.App.CORSAllowOrigins,
 	}, log)
+
+	apiV0 := e.Group("/api/v0")
+	applications.RegisterRoutes(apiV0, appsSvc, matchingAdapter{svc: connSvc})
+	connectors.RegisterRoutes(apiV0, connSvc)
 
 	// Serve in a goroutine so we can react to signals.
 	serveErr := make(chan error, 1)
@@ -260,4 +315,37 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// matchingAdapter bridges applications.MatchingProvider to
+// connectors.Service so the applications package never imports
+// connectors directly.
+type matchingAdapter struct {
+	svc *connectors.Service
+}
+
+func (m matchingAdapter) MatchingForTags(ctx context.Context, requiredTags []string, onlineOnly bool) (any, error) {
+	insts, err := m.svc.MatchingForTags(ctx, requiredTags, onlineOnly)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]connectors.InstanceWire, 0, len(insts))
+	for _, inst := range insts {
+		out = append(out, connectors.NewInstanceWire(inst))
+	}
+	return out, nil
+}
+
+// lakeReaderAdapter implements connectors.LakeReader on top of the
+// process-wide storage factory.
+type lakeReaderAdapter struct {
+	factory *storage.Factory
+}
+
+func (a lakeReaderAdapter) ReadBatch(ctx context.Context, provider string, storageKey string) ([]map[string]any, error) {
+	s, err := a.factory.Get(provider)
+	if err != nil {
+		return nil, err
+	}
+	return s.ReadBatch(ctx, storageKey)
 }

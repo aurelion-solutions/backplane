@@ -1,6 +1,6 @@
-.PHONY: tidy fmt vet build run run-all test check clean
+.PHONY: tidy fmt vet build run run-all test check clean migrate-init migrate-up migrate-down migrate-status
 
-CMDS := backplane worker log-siem-transmitter log-dev-projector
+CMDS := backplane worker log-siem-transmitter log-dev-projector migrate
 
 tidy:
 	go mod tidy
@@ -36,6 +36,19 @@ test:
 	go test ./...
 
 check: fmt vet test
+
+# bun migrations — secret store comes from the same env vars as backplane.
+migrate-init:
+	go run ./cmd/migrate init
+
+migrate-up:
+	go run ./cmd/migrate up
+
+migrate-down:
+	go run ./cmd/migrate down
+
+migrate-status:
+	go run ./cmd/migrate status
 
 clean:
 	rm -rf bin tmp
