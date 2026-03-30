@@ -8,7 +8,7 @@
 //	envvars → secret.Factory → secret.Manager → config.Settings →
 //	logger → postgres.DB → rabbitmq.Conn → events sink → storage →
 //	siem → llm → connector RPC client → registration consumer →
-//	webserver → serve.
+//	integrations + inventory services → webserver → serve.
 //
 // Each factory fails fast: an unreachable dependency at startup aborts
 // the boot with a non-zero exit. Hexagonal-style: domain packages
@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -35,16 +36,23 @@ import (
 	"github.com/aurelion-solutions/backplane/internal/core/webserver"
 	"github.com/aurelion-solutions/backplane/internal/integrations/applications"
 	"github.com/aurelion-solutions/backplane/internal/integrations/connectors"
+	"github.com/aurelion-solutions/backplane/internal/inventory/customers"
+	"github.com/aurelion-solutions/backplane/internal/inventory/employee_records"
+	"github.com/aurelion-solutions/backplane/internal/inventory/employments"
+	"github.com/aurelion-solutions/backplane/internal/inventory/org_units"
+	"github.com/aurelion-solutions/backplane/internal/inventory/persons"
+	"github.com/aurelion-solutions/backplane/internal/inventory/principals"
+	"github.com/aurelion-solutions/backplane/internal/inventory/shared"
+	"github.com/aurelion-solutions/backplane/internal/inventory/workloads"
 	"github.com/aurelion-solutions/backplane/internal/platform/llm"
 	"github.com/aurelion-solutions/backplane/internal/platform/secretmanagers"
 	"github.com/aurelion-solutions/backplane/internal/platform/siem"
 	"github.com/aurelion-solutions/backplane/internal/platform/storage"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	"github.com/uptrace/bun"
 )
 
-// App-side constants. Everything that is NOT a secret lives here, not
-// in env. Env reads are reserved for "where to find the secret store".
 const (
 	httpAddr        = ":8000"
 	logLevel        = "info"
@@ -52,8 +60,6 @@ const (
 	llmProvider     = "llamacpp"
 )
 
-// siemProviders are fanned out via siem.MultiSink — every Event goes
-// to every listed sink, in order.
 var siemProviders = []string{"file", "stdout"}
 
 func main() {
@@ -75,13 +81,8 @@ func printBanner() {
 }
 
 func run(log *slog.Logger) error {
-	// Bootstrap env: only the secret-provider selection is read from env.
-	// Missing .env is non-fatal — production uses real env vars.
 	_ = godotenv.Load()
 
-	// The ONLY env reads in the whole service: how to reach the secret
-	// store. Everything downstream comes from there or from in-code
-	// constants — never from env.
 	providerName := envOr("AURELION_SECRET_PROVIDER", "file")
 	secretsFile := envOr("AURELION_SECRETS_FILE", ".secrets.json")
 
@@ -110,20 +111,14 @@ func run(log *slog.Logger) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	pgCfg := postgres.Config{
-		DSN:   settings.Postgres.DSN(),
-		Debug: settings.App.Debug,
-	}
+	pgCfg := postgres.Config{DSN: settings.Postgres.DSN(), Debug: settings.App.Debug}
 	var db *bun.DB
 	for attempt := 1; ; attempt++ {
 		db, err = postgres.New(ctx, pgCfg)
 		if err == nil {
 			break
 		}
-		log.Warn("postgres connect failed; retrying",
-			slog.Int("attempt", attempt),
-			slog.Any("err", err),
-		)
+		log.Warn("postgres connect failed; retrying", slog.Int("attempt", attempt), slog.Any("err", err))
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -149,10 +144,7 @@ func run(log *slog.Logger) error {
 		if err == nil {
 			break
 		}
-		log.Warn("rabbitmq connect failed; retrying",
-			slog.Int("attempt", attempt),
-			slog.Any("err", err),
-		)
+		log.Warn("rabbitmq connect failed; retrying", slog.Int("attempt", attempt), slog.Any("err", err))
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -169,12 +161,10 @@ func run(log *slog.Logger) error {
 	eventsSink := events.NewMQ(mq.Channel, settings.RabbitMQ.EventsExchange)
 	log.Info("events sink ready")
 
-	// Storage factory: file is real; s3 / iceberg are stubs.
 	stf := storage.NewFactory()
 	storage.RegisterFile(stf, storage.DefaultBasePath)
 	storage.RegisterS3(stf)
 	storage.RegisterIceberg(stf)
-
 	st, err := stf.Get(storageProvider)
 	if err != nil {
 		return err
@@ -182,9 +172,6 @@ func run(log *slog.Logger) error {
 	_ = st
 	log.Info("storage selected", slog.String("provider", storageProvider))
 
-	// LogSink factory: file + mq are real; the rest are stubs that
-	// return ErrNotImplemented from Emit. Replace the corresponding
-	// type in internal/platform/siem/ to ship a real backend.
 	lsf := siem.NewFactory()
 	siem.RegisterFile(lsf, siem.DefaultFilePath)
 	siem.RegisterStdout(lsf)
@@ -198,7 +185,6 @@ func run(log *slog.Logger) error {
 	siem.RegisterSeq(lsf)
 	siem.RegisterSplunk(lsf)
 	siem.RegisterZabbix(lsf)
-
 	sinks := make([]siem.Sink, 0, len(siemProviders))
 	for _, name := range siemProviders {
 		s, err := lsf.Get(name)
@@ -211,13 +197,10 @@ func run(log *slog.Logger) error {
 	_ = siemSink
 	log.Info("siem selected", slog.Any("providers", siemProviders))
 
-	// LLM factory: every backend is currently a stub. Replace the
-	// corresponding type in internal/platform/llm/ with a real impl.
 	llf := llm.NewFactory()
 	llm.RegisterLlamaCpp(llf)
 	llm.RegisterAnthropic(llf)
 	llm.RegisterOpenAI(llf)
-
 	llmClient, err := llf.Get(llmProvider)
 	if err != nil {
 		return err
@@ -225,10 +208,6 @@ func run(log *slog.Logger) error {
 	_ = llmClient
 	log.Info("llm selected", slog.String("provider", llmProvider))
 
-	// Connector RPC client (generic AMQP request/reply on a dedicated
-	// channel) + the connector-specific protocol wrapper. Reading large
-	// connector responses out of the data lake goes through a small
-	// adapter over the storage factory.
 	rpc := rabbitmq.NewRPCClient(mq.Conn, rabbitmq.RPCClientConfig{
 		ResponsesExchange: settings.RabbitMQ.ConnectorResponsesExchange,
 	})
@@ -243,16 +222,84 @@ func run(log *slog.Logger) error {
 
 	lakeReader := lakeReaderAdapter{factory: stf}
 	connectorRPC := connectors.NewRPCClient(rpc, lakeReader, settings.RabbitMQ.ConnectorCommandsExchange)
-	_ = connectorRPC // engines pick this up via DI when they materialise
+	_ = connectorRPC
 
-	// Repositories and services for the integrations layer.
+	// Integrations -----------------------------------------------------
 	appsRepo := applications.NewBunRepository(db)
 	appsSvc := applications.NewService(appsRepo, eventsSink, nil)
 
 	connRepo := connectors.NewBunRepository(db)
 	connSvc := connectors.NewService(connRepo, nil)
 
-	// Registration consumer runs in its own goroutine until ctx fires.
+	// Inventory --------------------------------------------------------
+	personsRepo := persons.NewBunRepository(db)
+	personsSvc := persons.NewService(personsRepo, eventsSink, nil)
+
+	orgUnitsRepo := org_units.NewBunRepository(db, nil)
+	orgUnitsSvc := org_units.NewService(orgUnitsRepo, eventsSink, nil, nil)
+
+	empsRepo := employments.NewBunRepository(db)
+	wlsRepo := workloads.NewBunRepository(db)
+	custRepo := customers.NewBunRepository(db, nil)
+	principalsRepo := principals.NewBunRepository(db)
+	erRepo := employee_records.NewBunRepository(db)
+
+	// Principals (subjects-replacement) depends on the body probes.
+	principalsSvc := principals.NewService(principals.Deps{
+		Repo: principalsRepo,
+		Sink: eventsSink,
+		Sources: principals.BodySources{
+			Employments: principalEmploymentAdapter{repo: empsRepo},
+			Workloads:   principalWorkloadAdapter{repo: wlsRepo},
+			Customers:   principalCustomerAdapter{repo: custRepo},
+		},
+	})
+
+	personsBridge := personsAdapter{repo: personsRepo}
+	orgUnitsBridge := orgUnitsAdapter{repo: orgUnitsRepo}
+	principalRecomputer := principalRecomputerAdapter{svc: principalsSvc}
+
+	empsSvc := employments.NewService(employments.Deps{
+		Repo:            empsRepo,
+		Sink:            eventsSink,
+		Persons:         personsBridge,
+		OrgUnits:        orgUnitsBridge,
+		Recomputer:      principalRecomputer,
+		PersonResolver:  personsBridge,
+		OrgUnitResolver: orgUnitsBridge,
+	})
+
+	wlsSvc := workloads.NewService(workloads.Deps{
+		Repo:        wlsRepo,
+		Sink:        eventsSink,
+		Employments: workloadEmploymentAdapter{repo: empsRepo},
+		Apps:        applicationCheckerAdapter{repo: appsRepo},
+	})
+
+	custSvc := customers.NewService(customers.Deps{
+		Repo:       custRepo,
+		Sink:       eventsSink,
+		Recomputer: principalRecomputer,
+	})
+
+	personAPI := personAPIAdapter{
+		personsRepo: personsRepo,
+		personsSvc:  personsSvc,
+		empsSvc:     empsSvc,
+		empsRepo:    empsRepo,
+	}
+	resolver := employee_records.NewResolver(erRepo, personAPI)
+	erSvc := employee_records.NewService(employee_records.Deps{
+		Repo:         erRepo,
+		Sink:         eventsSink,
+		Apps:         applicationCheckerAdapter{repo: appsRepo},
+		Persons:      erPersonsAdapter{repo: personsRepo},
+		Employments:  erEmploymentsAdapter{repo: empsRepo},
+		AppsResolver: applicationCodeResolver{repo: appsRepo},
+		Resolver:     resolver,
+	})
+
+	// Connector registration consumer goroutine.
 	regChan, err := mq.Conn.Channel()
 	if err != nil {
 		return fmt.Errorf("registration consumer channel: %w", err)
@@ -282,8 +329,14 @@ func run(log *slog.Logger) error {
 	apiV0 := e.Group("/api/v0")
 	applications.RegisterRoutes(apiV0, appsSvc, matchingAdapter{svc: connSvc})
 	connectors.RegisterRoutes(apiV0, connSvc)
+	persons.RegisterRoutes(apiV0, personsSvc)
+	org_units.RegisterRoutes(apiV0, orgUnitsSvc)
+	employments.RegisterRoutes(apiV0, empsSvc)
+	workloads.RegisterRoutes(apiV0, wlsSvc)
+	customers.RegisterRoutes(apiV0, custSvc)
+	employee_records.RegisterRoutes(apiV0, erSvc)
+	principals.RegisterRoutes(apiV0, principalsSvc)
 
-	// Serve in a goroutine so we can react to signals.
 	serveErr := make(chan error, 1)
 	go func() {
 		log.Info("http listening", slog.String("addr", httpAddr))
@@ -317,12 +370,10 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// matchingAdapter bridges applications.MatchingProvider to
-// connectors.Service so the applications package never imports
-// connectors directly.
-type matchingAdapter struct {
-	svc *connectors.Service
-}
+// -------- Cross-slice adapters --------
+
+// matchingAdapter bridges applications → connectors.
+type matchingAdapter struct{ svc *connectors.Service }
 
 func (m matchingAdapter) MatchingForTags(ctx context.Context, requiredTags []string, onlineOnly bool) (any, error) {
 	insts, err := m.svc.MatchingForTags(ctx, requiredTags, onlineOnly)
@@ -336,11 +387,8 @@ func (m matchingAdapter) MatchingForTags(ctx context.Context, requiredTags []str
 	return out, nil
 }
 
-// lakeReaderAdapter implements connectors.LakeReader on top of the
-// process-wide storage factory.
-type lakeReaderAdapter struct {
-	factory *storage.Factory
-}
+// lakeReaderAdapter implements connectors.LakeReader.
+type lakeReaderAdapter struct{ factory *storage.Factory }
 
 func (a lakeReaderAdapter) ReadBatch(ctx context.Context, provider string, storageKey string) ([]map[string]any, error) {
 	s, err := a.factory.Get(provider)
@@ -348,4 +396,256 @@ func (a lakeReaderAdapter) ReadBatch(ctx context.Context, provider string, stora
 		return nil, err
 	}
 	return s.ReadBatch(ctx, storageKey)
+}
+
+// personsAdapter bridges persons-repo to the employments slice.
+type personsAdapter struct{ repo persons.Repository }
+
+func (a personsAdapter) PersonExists(ctx context.Context, id uuid.UUID) (bool, error) {
+	_, err := a.repo.GetByID(ctx, id)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, persons.ErrNotFound) {
+		return false, nil
+	}
+	return false, err
+}
+func (a personsAdapter) PersonIDByExternalID(ctx context.Context, externalID string) (uuid.UUID, bool, error) {
+	p, err := a.repo.GetByExternalID(ctx, externalID)
+	if err == nil {
+		return p.ID, true, nil
+	}
+	if errors.Is(err, persons.ErrNotFound) {
+		return uuid.Nil, false, nil
+	}
+	return uuid.Nil, false, err
+}
+
+// orgUnitsAdapter bridges org_units-repo to the employments slice.
+type orgUnitsAdapter struct{ repo org_units.Repository }
+
+func (a orgUnitsAdapter) OrgUnitExists(ctx context.Context, id uuid.UUID) (bool, error) {
+	_, err := a.repo.GetByID(ctx, id)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, org_units.ErrNotFound) {
+		return false, nil
+	}
+	return false, err
+}
+func (a orgUnitsAdapter) OrgUnitIDByExternalID(ctx context.Context, externalID string) (uuid.UUID, bool, error) {
+	u, err := a.repo.GetByExternalID(ctx, externalID)
+	if err == nil {
+		return u.ID, true, nil
+	}
+	if errors.Is(err, org_units.ErrNotFound) {
+		return uuid.Nil, false, nil
+	}
+	return uuid.Nil, false, err
+}
+
+// applicationCheckerAdapter is reused by workloads + employee_records.
+type applicationCheckerAdapter struct{ repo applications.Repository }
+
+func (a applicationCheckerAdapter) ApplicationExists(ctx context.Context, id uuid.UUID) (bool, error) {
+	_, err := a.repo.GetByID(ctx, id)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, applications.ErrNotFound) {
+		return false, nil
+	}
+	return false, err
+}
+
+// applicationCodeResolver lifts an application code → uuid for
+// employee_records bulk upsert.
+type applicationCodeResolver struct{ repo applications.Repository }
+
+func (a applicationCodeResolver) ApplicationIDByCode(ctx context.Context, code string) (uuid.UUID, bool, error) {
+	app, err := a.repo.GetByCode(ctx, code)
+	if err == nil {
+		return app.ID, true, nil
+	}
+	if errors.Is(err, applications.ErrNotFound) {
+		return uuid.Nil, false, nil
+	}
+	return uuid.Nil, false, err
+}
+
+// workloadEmploymentAdapter implements workloads.EmploymentChecker.
+type workloadEmploymentAdapter struct{ repo employments.Repository }
+
+func (a workloadEmploymentAdapter) EmploymentExists(ctx context.Context, id uuid.UUID) (bool, error) {
+	_, err := a.repo.GetByID(ctx, id)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, employments.ErrNotFound) {
+		return false, nil
+	}
+	return false, err
+}
+
+// principalRecomputerAdapter bridges employments/customers → principals.
+type principalRecomputerAdapter struct{ svc *principals.Service }
+
+func (a principalRecomputerAdapter) RecomputeForBody(ctx context.Context, kind shared.PrincipalKind, bodyID uuid.UUID) error {
+	err := a.svc.RecomputeForBody(ctx, kind, bodyID)
+	if err != nil && errors.Is(err, principals.ErrPrincipalMissingForBody) {
+		// No principal row yet — recompute is a no-op until one is
+		// created. Expected steady state during bulk imports that
+		// haven't reached the principals pass yet.
+		return nil
+	}
+	return err
+}
+
+// principalEmploymentAdapter / principalWorkloadAdapter /
+// principalCustomerAdapter wire principals → underlying body state.
+type principalEmploymentAdapter struct{ repo employments.Repository }
+
+func (a principalEmploymentAdapter) EmploymentCode(ctx context.Context, id uuid.UUID) (string, bool, error) {
+	e, err := a.repo.GetByID(ctx, id)
+	if err == nil {
+		return e.Code, true, nil
+	}
+	if errors.Is(err, employments.ErrNotFound) {
+		return "", false, nil
+	}
+	return "", false, err
+}
+
+type principalWorkloadAdapter struct{ repo workloads.Repository }
+
+func (a principalWorkloadAdapter) WorkloadExists(ctx context.Context, id uuid.UUID) (bool, error) {
+	_, err := a.repo.GetByID(ctx, id)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, workloads.ErrNotFound) {
+		return false, nil
+	}
+	return false, err
+}
+
+type principalCustomerAdapter struct{ repo customers.Repository }
+
+func (a principalCustomerAdapter) CustomerState(ctx context.Context, id uuid.UUID) (principals.CustomerStateView, error) {
+	c, err := a.repo.GetByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, customers.ErrNotFound) {
+			return principals.CustomerStateView{Exists: false}, nil
+		}
+		return principals.CustomerStateView{}, err
+	}
+	return principals.CustomerStateView{
+		Exists:        true,
+		EmailVerified: c.EmailVerified,
+	}, nil
+}
+
+// erPersonsAdapter / erEmploymentsAdapter are the employee_records
+// service's PersonChecker / EmploymentChecker.
+type erPersonsAdapter struct{ repo persons.Repository }
+
+func (a erPersonsAdapter) PersonExists(ctx context.Context, id uuid.UUID) (bool, error) {
+	_, err := a.repo.GetByID(ctx, id)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, persons.ErrNotFound) {
+		return false, nil
+	}
+	return false, err
+}
+
+type erEmploymentsAdapter struct{ repo employments.Repository }
+
+func (a erEmploymentsAdapter) EmploymentExistsForPerson(ctx context.Context, empID, personID uuid.UUID) (bool, error) {
+	e, err := a.repo.GetByID(ctx, empID)
+	if err != nil {
+		if errors.Is(err, employments.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return e.PersonID == personID, nil
+}
+
+// personAPIAdapter is what the employee_records Resolver dispatches to:
+// it lifts (find / create / propagate / primary-employment) onto the
+// concrete persons + employments services and repos.
+type personAPIAdapter struct {
+	personsRepo persons.Repository
+	personsSvc  *persons.Service
+	empsRepo    employments.Repository
+	empsSvc     *employments.Service
+}
+
+func (a personAPIAdapter) FindPersonByAttribute(ctx context.Context, key, value string) (uuid.UUID, bool, error) {
+	rows, _, err := a.personsRepo.List(ctx, 0, 0)
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	// O(N*M) scan is fine for now — when the inventory grows we will
+	// add a dedicated repo method backed by an index on
+	// person_attributes(key, value).
+	for _, p := range rows {
+		attrs, err := a.personsRepo.ListAttributes(ctx, p.ID)
+		if err != nil {
+			return uuid.Nil, false, err
+		}
+		for _, attr := range attrs {
+			if attr.Key == key && attr.Value == value {
+				return p.ID, true, nil
+			}
+		}
+	}
+	return uuid.Nil, false, nil
+}
+
+func (a personAPIAdapter) CreatePersonWithEmployment(ctx context.Context, key, value string) (uuid.UUID, uuid.UUID, error) {
+	stamp := uuid.New().String()
+	p, err := a.personsSvc.Create(ctx, persons.CreatePayload{
+		ExternalID: "resolver-" + stamp,
+		FullName:   "resolver-created",
+	})
+	if err != nil {
+		return uuid.Nil, uuid.Nil, fmt.Errorf("resolver: person: %w", err)
+	}
+	if _, err := a.personsSvc.AddAttribute(ctx, p.ID, persons.AttributeCreatePayload{
+		Key: strings.TrimSpace(key), Value: value,
+	}); err != nil {
+		return uuid.Nil, uuid.Nil, fmt.Errorf("resolver: seed person attribute: %w", err)
+	}
+	e, err := a.empsSvc.Create(ctx, employments.CreatePayload{
+		PersonID:  p.ID,
+		Code:      "active",
+		StartDate: time.Now().UTC(),
+	})
+	if err != nil {
+		return uuid.Nil, uuid.Nil, fmt.Errorf("resolver: employment: %w", err)
+	}
+	return p.ID, e.ID, nil
+}
+
+func (a personAPIAdapter) PropagateAttribute(ctx context.Context, personID uuid.UUID, key, value string) error {
+	_, err := a.personsSvc.AddAttribute(ctx, personID, persons.AttributeCreatePayload{
+		Key: strings.TrimSpace(key), Value: value,
+	})
+	return err
+}
+
+func (a personAPIAdapter) PrimaryEmploymentForPerson(ctx context.Context, personID uuid.UUID) (uuid.UUID, bool, error) {
+	active, err := a.empsRepo.ListActiveByPerson(ctx, personID, time.Now().UTC())
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	if len(active) == 0 {
+		return uuid.Nil, false, nil
+	}
+	return active[0].ID, true, nil
 }
