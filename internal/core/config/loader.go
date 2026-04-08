@@ -31,10 +31,15 @@ func Load(sm secret.Manager) (*Settings, error) {
 	if err != nil {
 		return nil, err
 	}
+	cart, err := loadCartridges(sm)
+	if err != nil {
+		return nil, err
+	}
 	return &Settings{
-		Postgres: pg,
-		RabbitMQ: rmq,
-		App:      app,
+		Postgres:   pg,
+		RabbitMQ:   rmq,
+		App:        app,
+		Cartridges: cart,
 	}, nil
 }
 

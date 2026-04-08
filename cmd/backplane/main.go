@@ -28,9 +28,16 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aurelion-solutions/backplane/internal/actions/noop"
+	"github.com/aurelion-solutions/backplane/internal/core/cartridges"
 	"github.com/aurelion-solutions/backplane/internal/core/config"
 	"github.com/aurelion-solutions/backplane/internal/core/events"
 	"github.com/aurelion-solutions/backplane/internal/core/logger"
+	"github.com/aurelion-solutions/backplane/internal/core/orchestrator"
+	"github.com/aurelion-solutions/backplane/internal/core/orchestrator/beat"
+	"github.com/aurelion-solutions/backplane/internal/core/orchestrator/loader"
+	"github.com/aurelion-solutions/backplane/internal/core/orchestrator/matcher"
+	"github.com/aurelion-solutions/backplane/internal/core/orchestrator/registry"
 	"github.com/aurelion-solutions/backplane/internal/core/postgres"
 	"github.com/aurelion-solutions/backplane/internal/core/rabbitmq"
 	"github.com/aurelion-solutions/backplane/internal/core/webserver"
@@ -197,6 +204,34 @@ func run(log *slog.Logger) error {
 	_ = siemSink
 	log.Info("siem selected", slog.Any("providers", siemProviders))
 
+	cf := cartridges.NewFactory()
+	cartridges.RegisterFilesystem(cf, settings.Cartridges.Root)
+	cartridgesProvider, err := cf.Get(settings.Cartridges.Provider)
+	if err != nil {
+		return err
+	}
+	log.Info("cartridges provider selected",
+		slog.String("provider", settings.Cartridges.Provider),
+		slog.String("root", settings.Cartridges.Root),
+	)
+
+	actionReg := registry.New()
+	noop.Register(actionReg)
+	log.Info("action registry ready", slog.Int("actions", len(actionReg.All())))
+
+	// Action-ref validation is intentionally off while most engines
+	// still live in aurelion-kernel — flipping Actions to actionReg
+	// will be safe once the Go-side engine surface catches up.
+	pipelineLoader := &loader.Loader{Actions: nil}
+	catalog, err := orchestrator.LoadFromCartridges(cartridgesProvider, pipelineLoader, nil)
+	if err != nil {
+		return fmt.Errorf("orchestrator: load pipelines: %w", err)
+	}
+	log.Info("pipeline catalog loaded",
+		slog.Int("pipelines", len(catalog.All())),
+		slog.Any("cartridges", catalog.Sources()),
+	)
+
 	llf := llm.NewFactory()
 	llm.RegisterLlamaCpp(llf)
 	llm.RegisterAnthropic(llf)
@@ -326,7 +361,47 @@ func run(log *slog.Logger) error {
 		CORSAllowOrigins: settings.App.CORSAllowOrigins,
 	}, log)
 
+	orchSvc := orchestrator.NewService(orchestrator.NewBunRepository())
+
+	// Beat goroutine — periodic schedule firing + waiter timeout sweep.
+	// Multi-replica safety is enforced inside Tick via pg_try_advisory_lock,
+	// so it is safe to launch from every backplane process.
+	go func() {
+		b := beat.New(db, orchSvc, catalog, log.With(slog.String("component", "beat")))
+		if err := b.Loop(ctx); err != nil {
+			log.Error("beat loop terminated", slog.Any("err", err))
+		}
+	}()
+
+	// Matcher goroutine — RabbitMQ event consumer. Cluster-wide there
+	// is at most one active matcher; the rest become warm standbys via
+	// a session-level pg_advisory_lock on a dedicated PG connection.
+	matcherChan, err := mq.Conn.Channel()
+	if err != nil {
+		return fmt.Errorf("matcher channel: %w", err)
+	}
+	defer func() { _ = matcherChan.Close() }()
+	go func() {
+		mt := matcher.New(matcher.Config{
+			DB:             db,
+			Channel:        matcherChan,
+			Service:        orchSvc,
+			Catalog:        catalog,
+			Log:            log.With(slog.String("component", "matcher")),
+			EventsExchange: settings.RabbitMQ.EventsExchange,
+			MatcherQueue:   settings.RabbitMQ.MatcherQueue,
+		})
+		if err := mt.Loop(ctx); err != nil {
+			log.Error("matcher loop terminated", slog.Any("err", err))
+		}
+	}()
+
 	apiV0 := e.Group("/api/v0")
+	cartridges.RegisterRoutes(apiV0, cartridgesProvider)
+	orchestrator.RegisterDefinitionRoutes(apiV0, catalog, actionReg)
+	orchestrator.RegisterRunRoutes(apiV0, db, orchSvc, catalog)
+	orchestrator.RegisterWorkerRoutes(apiV0, db, orchSvc)
+	orchestrator.RegisterWellKnownRoutes(e, actionReg)
 	applications.RegisterRoutes(apiV0, appsSvc, matchingAdapter{svc: connSvc})
 	connectors.RegisterRoutes(apiV0, connSvc)
 	persons.RegisterRoutes(apiV0, personsSvc)

@@ -23,6 +23,7 @@ type RabbitMQ struct {
 	ConnectorResponsesExchange    string `json:"connector_responses_exchange"`
 	ConnectorRegistrationExchange string `json:"connector_registration_exchange"`
 	ConnectorRegistrationQueue    string `json:"connector_registration_queue"`
+	MatcherQueue                  string `json:"matcher_queue"`
 }
 
 // DefaultRabbitMQ returns local-dev defaults aligned with kernel.
@@ -38,6 +39,7 @@ func DefaultRabbitMQ() RabbitMQ {
 		ConnectorResponsesExchange:    "aurelion.connectors.responses",
 		ConnectorRegistrationExchange: "aurelion.connectors.registry",
 		ConnectorRegistrationQueue:    "aurelion.connectors.registration",
+		MatcherQueue:                  "aurelion.orchestrator.matcher",
 	}
 }
 

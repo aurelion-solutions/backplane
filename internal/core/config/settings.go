@@ -24,7 +24,8 @@ package config
 // Settings is the top-level immutable bootstrap snapshot. Built once
 // per process by Load and passed by value into every factory.
 type Settings struct {
-	Postgres Postgres
-	RabbitMQ RabbitMQ
-	App      App
+	Postgres   Postgres
+	RabbitMQ   RabbitMQ
+	App        App
+	Cartridges Cartridges
 }
