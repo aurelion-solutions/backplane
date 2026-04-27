@@ -1,6 +1,6 @@
 .PHONY: tidy fmt vet build run run-all test check clean migrate-init migrate-up migrate-down migrate-status
 
-CMDS := backplane worker log-siem-transmitter log-dev-projector migrate
+CMDS := backplane worker ingester log-siem-transmitter log-dev-projector migrate
 
 tidy:
 	go mod tidy
@@ -22,11 +22,13 @@ run:
 	go run ./cmd/backplane
 
 # Run every binary in the foreground, multiplexed into this terminal.
-# Output from all four interleaves; Ctrl+C kills the whole group.
+# Output from all binaries interleaves; Ctrl+C kills the whole group.
+# migrate is a one-shot tool, not a long-running process — skipped here.
 .ONESHELL:
 run-all: build
 	@trap 'kill 0' SIGINT SIGTERM
-	for c in $(CMDS); do \
+	export AURELION_INGESTER_INSTANCE_ID=$${AURELION_INGESTER_INSTANCE_ID:-ingester-dev}
+	for c in backplane worker ingester log-siem-transmitter log-dev-projector; do \
 		echo "→ starting $$c"; \
 		./bin/$$c & \
 	done

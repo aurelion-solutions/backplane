@@ -18,8 +18,11 @@ import (
 	"github.com/google/uuid"
 )
 
-// DefaultBasePath is the relative directory used when no override is supplied.
-const DefaultBasePath = ".lake"
+// DefaultBasePath is the relative directory used when no override is
+// supplied. The lake lives one level above each binary's cwd so it
+// can be shared by every subrepo in the monorepo (kernel, backplane,
+// future runtimes) without polluting any individual project tree.
+const DefaultBasePath = "../.lake"
 
 // File is a development-only data-lake backend. Batches are written
 // as JSONL (one record per line) under <base>/<datasetType>/<uuid>.jsonl.

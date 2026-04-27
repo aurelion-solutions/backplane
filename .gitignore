@@ -13,4 +13,12 @@ coverage.txt
 .idea/
 .vscode/
 
-.logs/
+# Lake (raw ingest JSONL) and SIEM event log live ONE LEVEL UP at
+# monorepo root — see internal/platform/storage/file.go and
+# internal/platform/siem/file.go. Belt-and-braces: ignore them inside
+# this subrepo too in case a binary is ever launched with a different
+# cwd by mistake.
+/.lake/
+/.logs/
+/logs/
+/scripts/

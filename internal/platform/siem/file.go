@@ -16,8 +16,11 @@ import (
 	"sync"
 )
 
-// DefaultFilePath is the relative path used when no override is supplied.
-const DefaultFilePath = ".logs/aurelion.log.jsonl"
+// DefaultFilePath is the relative path used when no override is
+// supplied. Logs live one level above each binary's cwd (same idea
+// as the lake) so the dev-time event stream is monorepo-wide, not
+// per-subrepo.
+const DefaultFilePath = "../.logs/aurelion.log.jsonl"
 
 // FileSink is an append-only JSONL sink. One Event per line, UTF-8.
 // Writes are serialised by an internal mutex; safe for concurrent Emit.

@@ -24,3 +24,8 @@ func (Stub) ReadBatch(_ context.Context, _ string) ([]map[string]any, error) {
 func (Stub) DeleteBatch(_ context.Context, _ string) error {
 	return ErrNotImplemented
 }
+
+// AntiJoin implements Storage.
+func (Stub) AntiJoin(_ context.Context, _ string, _ []Candidate) (AntiJoinResult, error) {
+	return AntiJoinResult{}, ErrNotImplemented
+}

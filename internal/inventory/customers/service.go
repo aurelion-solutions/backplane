@@ -116,7 +116,7 @@ func (s *Service) List(ctx context.Context, limit, offset int) ([]*Customer, int
 }
 
 // Update applies the strict 4-field patch and emits one updated event
-// listing the changed fields. Triggers subject status recompute when
+// listing the changed fields. Triggers principal status recompute when
 // email_verified or is_locked transitions.
 func (s *Service) Update(ctx context.Context, id uuid.UUID, in PatchPayload) (*Customer, error) {
 	if err := in.Validate(); err != nil {

@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -27,6 +28,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	amqp "github.com/rabbitmq/amqp091-go"
 
 	"github.com/aurelion-solutions/backplane/internal/actions/noop"
 	"github.com/aurelion-solutions/backplane/internal/core/cartridges"
@@ -41,9 +44,21 @@ import (
 	"github.com/aurelion-solutions/backplane/internal/core/postgres"
 	"github.com/aurelion-solutions/backplane/internal/core/rabbitmq"
 	"github.com/aurelion-solutions/backplane/internal/core/webserver"
+	"github.com/aurelion-solutions/backplane/internal/engines/inventory_discover"
+	"github.com/aurelion-solutions/backplane/internal/engines/inventory_ingest"
+	normalize_access_grant "github.com/aurelion-solutions/backplane/internal/engines/inventory_normalize/actions/access_grant_record"
+	normalize_account "github.com/aurelion-solutions/backplane/internal/engines/inventory_normalize/actions/account"
+	normalize_employee "github.com/aurelion-solutions/backplane/internal/engines/inventory_normalize/actions/employee"
+	normalize_orgunit "github.com/aurelion-solutions/backplane/internal/engines/inventory_normalize/actions/orgunit"
 	"github.com/aurelion-solutions/backplane/internal/integrations/applications"
 	"github.com/aurelion-solutions/backplane/internal/integrations/connectors"
+	"github.com/aurelion-solutions/backplane/internal/transports/ingest_mq"
+	"github.com/aurelion-solutions/backplane/internal/inventory/accounts"
+	"github.com/aurelion-solutions/backplane/internal/inventory/capability_grants"
+	"github.com/aurelion-solutions/backplane/internal/inventory/capability_mappings"
 	"github.com/aurelion-solutions/backplane/internal/inventory/customers"
+	"github.com/aurelion-solutions/backplane/internal/inventory/employee_provider_mappings"
+	"github.com/aurelion-solutions/backplane/internal/inventory/employment_record_matches"
 	"github.com/aurelion-solutions/backplane/internal/inventory/employee_records"
 	"github.com/aurelion-solutions/backplane/internal/inventory/employments"
 	"github.com/aurelion-solutions/backplane/internal/inventory/org_units"
@@ -143,6 +158,7 @@ func run(log *slog.Logger) error {
 			{Name: settings.RabbitMQ.ConnectorCommandsExchange, Type: rabbitmq.Direct},
 			{Name: settings.RabbitMQ.ConnectorResponsesExchange, Type: rabbitmq.Direct},
 			{Name: settings.RabbitMQ.ConnectorRegistrationExchange, Type: rabbitmq.Topic},
+			{Name: ingest_mq.DefaultExchange, Type: rabbitmq.Topic},
 		},
 	}
 	var mq *rabbitmq.Conn
@@ -176,7 +192,6 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	_ = st
 	log.Info("storage selected", slog.String("provider", storageProvider))
 
 	lsf := siem.NewFactory()
@@ -217,6 +232,24 @@ func run(log *slog.Logger) error {
 
 	actionReg := registry.New()
 	noop.Register(actionReg)
+	normalize_account.Register(actionReg, normalize_account.Deps{
+		Lake: st,
+		Repo: accounts.NewBunRepository(),
+	})
+	normalize_access_grant.Register(actionReg, normalize_access_grant.Deps{
+		Lake:     st,
+		Accounts: accounts.NewLookupBunRepository(),
+		Mappings: capability_mappings.NewBunRepository(),
+		Grants:   capability_grants.NewBunRepository(),
+	})
+	normalize_employee.Register(actionReg, normalize_employee.Deps{
+		Lake:     st,
+		Mappings: employee_provider_mappings.NewBunRepository(),
+		Persons:  persons.NewAttributeLookupBunRepository(),
+		OrgUnits: org_units.NewLookupBunRepository(),
+		Matches:  employment_record_matches.NewBunRepository(),
+	})
+	normalize_orgunit.Register(actionReg, normalize_orgunit.Deps{Lake: st})
 	log.Info("action registry ready", slog.Int("actions", len(actionReg.All())))
 
 	// Action-ref validation is intentionally off while most engines
@@ -256,8 +289,7 @@ func run(log *slog.Logger) error {
 	)
 
 	lakeReader := lakeReaderAdapter{factory: stf}
-	connectorRPC := connectors.NewRPCClient(rpc, lakeReader, settings.RabbitMQ.ConnectorCommandsExchange)
-	_ = connectorRPC
+	_ = connectors.NewRPCClient(rpc, lakeReader, settings.RabbitMQ.ConnectorCommandsExchange)
 
 	// Integrations -----------------------------------------------------
 	appsRepo := applications.NewBunRepository(db)
@@ -334,6 +366,27 @@ func run(log *slog.Logger) error {
 		Resolver:     resolver,
 	})
 
+	// Engines ----------------------------------------------------------
+	ingestRepo := inventory_ingest.NewBunRepository(db)
+	ingestSvc := inventory_ingest.NewService(inventory_ingest.Deps{
+		Repo: ingestRepo,
+		Lake: ingestLakeAdapter{storage: st},
+		Sink: eventsSink,
+	})
+
+	discoverDispatchChan, err := mq.Conn.Channel()
+	if err != nil {
+		return fmt.Errorf("discover dispatch channel: %w", err)
+	}
+	defer func() { _ = discoverDispatchChan.Close() }()
+
+	discoverRepo := inventory_discover.NewBunRepository(db)
+	discoverSvc := inventory_discover.NewService(inventory_discover.Deps{
+		Repo:     discoverRepo,
+		Dispatch: discoverDispatchAdapter{channel: discoverDispatchChan, exchange: settings.RabbitMQ.ConnectorCommandsExchange},
+		Sink:     eventsSink,
+	})
+
 	// Connector registration consumer goroutine.
 	regChan, err := mq.Conn.Channel()
 	if err != nil {
@@ -396,6 +449,31 @@ func run(log *slog.Logger) error {
 		}
 	}()
 
+	// Discover subscriber — listens for connector.discover.* events
+	// and walks the matching DiscoverRun through dispatched → running
+	// → completed / failed.
+	discoverSubChan, err := mq.Conn.Channel()
+	if err != nil {
+		return fmt.Errorf("discover subscriber channel: %w", err)
+	}
+	defer func() { _ = discoverSubChan.Close() }()
+	go func() {
+		err := inventory_discover.RunSubscriber(ctx, inventory_discover.SubscriberConfig{
+			Channel:        discoverSubChan,
+			EventsExchange: settings.RabbitMQ.EventsExchange,
+			Queue:          inventory_discover.DefaultSubscriberQueue,
+			Service:        discoverSvc,
+			Log:            log.With(slog.String("component", "discover/subscriber")),
+		})
+		if err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("discover subscriber terminated", slog.Any("err", err))
+		}
+	}()
+	log.Info("discover subscriber running",
+		slog.String("exchange", settings.RabbitMQ.EventsExchange),
+		slog.String("queue", inventory_discover.DefaultSubscriberQueue),
+	)
+
 	apiV0 := e.Group("/api/v0")
 	cartridges.RegisterRoutes(apiV0, cartridgesProvider)
 	orchestrator.RegisterDefinitionRoutes(apiV0, catalog, actionReg)
@@ -411,6 +489,8 @@ func run(log *slog.Logger) error {
 	customers.RegisterRoutes(apiV0, custSvc)
 	employee_records.RegisterRoutes(apiV0, erSvc)
 	principals.RegisterRoutes(apiV0, principalsSvc)
+	inventory_ingest.RegisterRoutes(apiV0, ingestSvc)
+	inventory_discover.RegisterRoutes(apiV0, discoverSvc)
 
 	serveErr := make(chan error, 1)
 	go func() {
@@ -460,6 +540,46 @@ func (m matchingAdapter) MatchingForTags(ctx context.Context, requiredTags []str
 		out = append(out, connectors.NewInstanceWire(inst))
 	}
 	return out, nil
+}
+
+// ingestLakeAdapter implements inventory_ingest.Lake by delegating
+// to the configured platform/storage backend.
+type ingestLakeAdapter struct{ storage storage.Storage }
+
+func (a ingestLakeAdapter) WriteBatch(ctx context.Context, datasetType string, records []map[string]any) (string, error) {
+	return a.storage.WriteBatch(ctx, datasetType, records)
+}
+
+func (a ingestLakeAdapter) AntiJoin(ctx context.Context, datasetType string, candidates []storage.Candidate) (storage.AntiJoinResult, error) {
+	return a.storage.AntiJoin(ctx, datasetType, candidates)
+}
+
+// discoverDispatchAdapter publishes one fire-and-forget discover
+// command directly to the connector commands exchange. The connector
+// signals progress later via its own MQ events; discover never blocks
+// for an RPC reply.
+type discoverDispatchAdapter struct {
+	channel  *amqp.Channel
+	exchange string
+}
+
+func (a discoverDispatchAdapter) Dispatch(ctx context.Context, cmd inventory_discover.Command) error {
+	body, err := json.Marshal(map[string]any{
+		"correlation_id": cmd.CorrelationID,
+		"operation":      cmd.Operation,
+		"dataset_type":   cmd.DatasetType,
+		"payload":        cmd.Payload,
+		"async":          true,
+	})
+	if err != nil {
+		return fmt.Errorf("discover/dispatch: marshal: %w", err)
+	}
+	return a.channel.PublishWithContext(ctx, a.exchange, cmd.InstanceID, false, false, amqp.Publishing{
+		ContentType:   "application/json",
+		DeliveryMode:  amqp.Persistent,
+		CorrelationId: cmd.CorrelationID,
+		Body:          body,
+	})
 }
 
 // lakeReaderAdapter implements connectors.LakeReader.

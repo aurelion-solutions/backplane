@@ -36,14 +36,27 @@ import (
 	"github.com/aurelion-solutions/backplane/internal/core/orchestrator/runner"
 	"github.com/aurelion-solutions/backplane/internal/core/postgres"
 	"github.com/aurelion-solutions/backplane/internal/core/rabbitmq"
+	normalize_access_grant "github.com/aurelion-solutions/backplane/internal/engines/inventory_normalize/actions/access_grant_record"
+	normalize_account "github.com/aurelion-solutions/backplane/internal/engines/inventory_normalize/actions/account"
+	normalize_employee "github.com/aurelion-solutions/backplane/internal/engines/inventory_normalize/actions/employee"
+	normalize_orgunit "github.com/aurelion-solutions/backplane/internal/engines/inventory_normalize/actions/orgunit"
+	"github.com/aurelion-solutions/backplane/internal/inventory/accounts"
+	"github.com/aurelion-solutions/backplane/internal/inventory/capability_grants"
+	"github.com/aurelion-solutions/backplane/internal/inventory/capability_mappings"
+	"github.com/aurelion-solutions/backplane/internal/inventory/employee_provider_mappings"
+	"github.com/aurelion-solutions/backplane/internal/inventory/employment_record_matches"
+	"github.com/aurelion-solutions/backplane/internal/inventory/org_units"
+	"github.com/aurelion-solutions/backplane/internal/inventory/persons"
 	"github.com/aurelion-solutions/backplane/internal/platform/secretmanagers"
 	"github.com/aurelion-solutions/backplane/internal/platform/siem"
+	"github.com/aurelion-solutions/backplane/internal/platform/storage"
 	"github.com/joho/godotenv"
 )
 
 const (
-	logLevel          = "info"
+	logLevel           = "info"
 	defaultWorkerSlots = 4
+	storageProvider    = "file"
 )
 
 func main() {
@@ -124,9 +137,40 @@ func run(log *slog.Logger) error {
 		slog.String("root", settings.Cartridges.Root),
 	)
 
-	// Action registry + noop actions (smoke / HITL test surface).
+	// Storage (data lake) — needed by inventory_normalize actions that
+	// read raw records from lake batches by storage_key.
+	stf := storage.NewFactory()
+	storage.RegisterFile(stf, storage.DefaultBasePath)
+	storage.RegisterS3(stf)
+	storage.RegisterIceberg(stf)
+	st, err := stf.Get(storageProvider)
+	if err != nil {
+		return err
+	}
+	log.Info("storage selected", slog.String("provider", storageProvider))
+
+	// Action registry: noop (smoke / HITL test surface) +
+	// inventory_normalize actions.
 	reg := registry.New()
 	noop.Register(reg)
+	normalize_account.Register(reg, normalize_account.Deps{
+		Lake: st,
+		Repo: accounts.NewBunRepository(),
+	})
+	normalize_access_grant.Register(reg, normalize_access_grant.Deps{
+		Lake:     st,
+		Accounts: accounts.NewLookupBunRepository(),
+		Mappings: capability_mappings.NewBunRepository(),
+		Grants:   capability_grants.NewBunRepository(),
+	})
+	normalize_employee.Register(reg, normalize_employee.Deps{
+		Lake:     st,
+		Mappings: employee_provider_mappings.NewBunRepository(),
+		Persons:  persons.NewAttributeLookupBunRepository(),
+		OrgUnits: org_units.NewLookupBunRepository(),
+		Matches:  employment_record_matches.NewBunRepository(),
+	})
+	normalize_orgunit.Register(reg, normalize_orgunit.Deps{Lake: st})
 	log.Info("action registry ready", slog.Int("actions", len(reg.All())))
 
 	pipelineLoader := &loader.Loader{Actions: nil} // see backplane main for rationale

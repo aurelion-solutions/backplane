@@ -13,10 +13,10 @@
 // We do NOT enforce a closed vocabulary; every company labels their
 // working states differently and we will not pretend otherwise.
 //
-// Subjects are tied to Employments (not Persons): when the developer
+// Principals are tied to Employments (not Persons): when the developer
 // mask is the active identity, the access policy looks at that
-// Employment's subject; when the QA mask is the active one, a
-// different Subject row applies. See the subjects slice.
+// Employment's Principal; when the QA mask is the active one, a
+// different Principal row applies. See the principals slice.
 package employments
 
 import (

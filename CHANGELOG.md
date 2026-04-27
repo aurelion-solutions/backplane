@@ -5,6 +5,197 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [0.5.0] — 2026-04-27
+
+### Added
+
+#### `inventory_normalize` engine — orchestrator-action transforms from lake → typed inventory (`internal/engines/inventory_normalize/`)
+
+- Action-per-dataset model: every supported `dataset_type`
+  binds to one Go action registered against the orchestrator
+  action registry. Trigger is automatic via the matcher: an
+  `inventory.ingest.batch_received` MQ event with
+  `dataset_type=X` fires the `inventory.normalize.X` pipeline
+  with `batch_id`, `source`, `lake_ref` plumbed in through
+  `args_from_payload`. No YAML cartridge schema, no separate
+  normalize_runs audit table — orchestrator pipeline_runs
+  already records the run lifecycle.
+- `account` action: `dataset_type=account` → `accounts`
+  upsert keyed by `(application_id, username)`. Carries
+  `display_name`, `email`, `is_active`, `is_privileged`,
+  `mfa_enabled`, `status`, plus open-ended `attrs` jsonb.
+- `employee` action: `dataset_type=employee` → `persons` +
+  `employments` + EAV attribute sidecars. One incoming
+  record can carry multiple employment periods via
+  `payload.employments[]`; each period becomes its own
+  Employment row keyed by `(person_id, code, start_date)`.
+  `code` derives from `end_date` (`active` if null, else
+  `former`). Org-unit linkage resolves a contract-level
+  `org_unit_id` first, then falls back to `org_unit_name`
+  via display-name lookup; the result is a typed FK on the
+  Employment row plus the original name preserved in
+  `employment_attributes` when the FK didn't resolve.
+- `orgunit` action: `dataset_type=orgunit` → `org_units`
+  tree. Walks the contract's `children[]` top-down,
+  upserting each node keyed by `external_id` with
+  `RETURNING id`, then threads the resolved id down as
+  `parent_id` for the next level. Idempotent across
+  re-ingests.
+- `access_grant_record` action: `dataset_type=access_grant_record`
+  → `capability_grants` projection. Per record, resolves
+  the account via `(application_id, username)` lookup
+  (orphan grants — username with no matching account —
+  bump `unresolved_acct` and skip), then walks every
+  active `capability_mappings` rule. The projector is a
+  pure function: filter by `(application_id, action_slug)`,
+  match resource via XOR over
+  `(resource_id, resource_kind, resource_path_glob)`,
+  resolve scope value, upsert the resulting Grant.
+- `resource_external_id` scope-source kind: the projector's
+  `resolveScopeValue` gained a fourth discriminator that
+  pulls the resource external_id straight off the grant
+  record — the common case for "scope IS the thing"
+  rules (AD `group_member` → group SID, ACL
+  `file_access` → share id, SAP `role_assignment` → role
+  code). No lake lookup needed; the value is already on
+  the projector input.
+
+#### Inventory model: identity + access pillars
+
+- `persons` slice gains `AttributeLookup` — narrow port
+  for cross-app determinator matching (resolves a person
+  by `(key, value)` pairs across the `person_attributes`
+  EAV sidecar).
+- `employments` slice — per-person work-history rows.
+  Natural key `(person_id, code, start_date)` plus
+  `code='active'` partial unique index that enforces "at
+  most one active period per person." `employment_attributes`
+  is the EAV sidecar for per-period scalars (`title_id`,
+  `title_name`, `org_unit_name` fallback).
+- `employment_record_matches` slice — lineage table tying
+  one upstream `(source, external_id, period_start_date)`
+  triple to one Employment. The `period_start_date` in
+  the unique key is what lets the same HRIS record carry
+  multiple historical periods without colliding.
+- `employee_provider_mappings` slice — per-application
+  rules indexing which payload keys feed Person /
+  Employment fields. Carries `IsDeterminator` so the
+  resolver knows which keys to use for cross-application
+  identity resolution vs which to merely upsert as
+  attributes.
+- `org_units` slice — tree-shaped org structure with
+  recursive `parent_id`. Adds `display_name` and
+  `is_active` columns. `Lookup` port exposes both stable
+  (`GetIDByExternalID`) and fallback (`GetIDByDisplayName`)
+  paths for downstream actions.
+- `accounts` slice — provider user-mailbox inventory.
+  Natural key `(application_id, username)`. `Lookup` port
+  fronts the access-projection path. Account → principal
+  matching is deliberately deferred to a separate engine.
+- `capabilities`, `capability_scope_keys`,
+  `capability_mappings`, `capability_grants` slices —
+  the access-projection vocabulary and storage. Mappings
+  are admin-managed rules (`scope_value_source` is a
+  discriminated-union JSONB); grants are the projected
+  `(account, capability, scope_key, scope_value)` tuples
+  that downstream UIs / detection / certification consume.
+
+#### `inventory_ingest` engine — REST + MQ entrypoint to the data lake (`internal/engines/inventory_ingest/`)
+
+- Atomic responsibility: accept a batch of raw records,
+  hash them, anti-join against what the lake already
+  knows, write only the changed ones to JSONL, persist a
+  metadata row, emit an event. No normalisation, no
+  per-entity reasoning. Two transports share the same
+  service: REST `POST /api/v0/ingest` for synchronous
+  callers with batches in memory, and a separate
+  `cmd/ingester` binary that consumes one-record-per-message
+  AMQP traffic, windows by `(source, dataset_type,
+  correlation_id)`, and calls Process per window.
+- `inventory_ingest_batches` table — one row per accepted
+  batch with `source`, `dataset_type`, item count,
+  `lake_ref`, status (`pending` → `stored` / `failed`),
+  per-record counts (`received`, `written`, `skipped`,
+  `new`, `changed`), error, `received_at`,
+  `completed_at`.
+- DuckDB-driven hash anti-join (`internal/platform/storage/
+  file_antijoin.go`) reads existing batch JSONL on disk
+  and compares SHA-256 of canonical-JSON payloads — same
+  external_id with same hash is a no-op, same external_id
+  with different hash is a `changed`, fresh external_id
+  is `new`.
+- Events: `inventory.ingest.batch_received` on success
+  (carries `batch_id`, `source`, `dataset_type`,
+  `lake_ref`); `inventory.ingest.batch_failed` on lake
+  write error. The orchestrator matcher pipes these into
+  the dataset-specific normalize pipelines.
+- REST surface: `POST /ingest`, `GET /ingest/batches`,
+  `GET /ingest/batches/:id`. 50 000-record cap, payload
+  stored as `[]map[string]any`, 502 on lake-write
+  failure so the client can distinguish bad envelopes
+  from unreachable storage.
+
+#### `inventory_discover` engine — pull-side entrypoint for raw inventory data (`internal/engines/inventory_discover/`)
+
+- Active-side counterpart to `inventory_ingest`. Instead of
+  waiting for a push, asks a registered connector instance
+  to produce a fresh snapshot via the existing AMQP RPC
+  channel, then routes the records through the ingest
+  engine so the lake-write path stays single-source.
+- `inventory_discover_runs` table — one row per Fetch call
+  with `connector_instance_id`, `operation`, `dataset_type`,
+  lifecycle (`running` → `completed` / `failed`),
+  `ingest_batch_id` link, item count, error, timestamps.
+- REST surface under `/api/v0/discover/runs`: `POST` to
+  trigger a fetch synchronously (envelope validation +
+  RPC + ingest in one HTTP roundtrip); `GET` list paginated
+  by `started_at DESC`; `GET /:id` for a single run.
+  Connector / ingest failures return 502 with the run
+  marked failed; envelope errors return 400.
+- Reuses the connectors RPCClient unchanged: connectors
+  may reply inline or via `result_storage_ref`, and the
+  RPC client resolves either shape into a uniform record
+  list before discover sees it.
+- Events: `inventory.discover.run.started` (on Insert),
+  `inventory.discover.run.completed` (on success, includes
+  `ingest_batch_id`), `inventory.discover.run.failed` (on
+  any failure). Normalize subscribes to
+  `inventory.ingest.batch_received`, NOT to these — push
+  and pull paths produce one canonical "new batch" event.
+- Composition root wires a thin `discoverConnectorAdapter`
+  so the engine package has no direct dependency on the
+  `integrations/connectors` API surface.
+
+#### Platform / infra
+
+- `internal/transports/ingest_mq` — durable AMQP ingest
+  consumer that connects the `cmd/ingester` binary to
+  `inventory_ingest.Process`. Per-window aggregation
+  (`source`, `dataset_type`, `correlation_id`) batches
+  one-record-per-message traffic into single Service
+  calls so the lake-write path stays one path.
+- `internal/platform/storage/file_antijoin.go` — DuckDB
+  scan over batch JSONL with SHA-256 hashing of canonical
+  payload JSON. Powers the ingest path's "only write
+  changed records" semantic.
+- Default lake and SIEM-log paths now live one level
+  above each binary's cwd (`../.lake` and
+  `../.logs/aurelion.log.jsonl`). Lake and event stream
+  are monorepo-wide artifacts, not subrepo-local clutter.
+- Six migrations land for the new tables and columns:
+  `inventory_ingest`, `inventory_discover`, `accounts`,
+  `capability_model` (capabilities + scope_keys +
+  mappings + grants), `employee_normalize` (persons +
+  employments + matches + provider_mappings),
+  `org_units_normalize` (`display_name`, `is_active`).
+- `cmd/ingester` — the second runtime binary. Claims
+  `AURELION_INGESTER_INSTANCE_ID`, opens N worker
+  goroutines (`AURELION_INGESTER_SLOTS`), each consuming
+  off the same durable queue with prefetch=1 for fair
+  cross-replica distribution.
+
 ## [0.4.0] — 2026-04-08
 
 ### Added

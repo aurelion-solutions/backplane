@@ -17,15 +17,21 @@ import (
 )
 
 // OrgUnit is a node in an org-unit tree.
+//
+// Name is the machine-friendly code (qa, engineering); DisplayName is
+// the human-readable label (UI / reports). IsActive is a soft-delete
+// flag from the source.
 type OrgUnit struct {
 	bun.BaseModel `bun:"table:org_units,alias:ou"`
 
-	ID          uuid.UUID  `bun:"id,pk,type:uuid"     json:"id"`
-	ExternalID  string     `bun:"external_id,notnull" json:"external_id"`
-	Name        string     `bun:"name,notnull"        json:"name"`
-	ParentID    *uuid.UUID `bun:"parent_id"           json:"parent_id,omitempty"`
-	Description *string    `bun:"description"         json:"description,omitempty"`
-	IsInternal  bool       `bun:"is_internal,notnull" json:"is_internal"`
-	CreatedAt   time.Time  `bun:"created_at,notnull"  json:"created_at"`
-	UpdatedAt   time.Time  `bun:"updated_at,notnull"  json:"updated_at"`
+	ID          uuid.UUID  `bun:"id,pk,type:uuid"      json:"id"`
+	ExternalID  string     `bun:"external_id,notnull"  json:"external_id"`
+	Name        string     `bun:"name,notnull"         json:"name"`
+	DisplayName string     `bun:"display_name,notnull" json:"display_name"`
+	ParentID    *uuid.UUID `bun:"parent_id"            json:"parent_id,omitempty"`
+	Description *string    `bun:"description"          json:"description,omitempty"`
+	IsActive    bool       `bun:"is_active,notnull"    json:"is_active"`
+	IsInternal  bool       `bun:"is_internal,notnull"  json:"is_internal"`
+	CreatedAt   time.Time  `bun:"created_at,notnull"   json:"created_at"`
+	UpdatedAt   time.Time  `bun:"updated_at,notnull"   json:"updated_at"`
 }

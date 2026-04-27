@@ -4,8 +4,8 @@
 
 // Package customers owns the Customer entity — an end-user principal
 // independent of Employees and Workloads. Customers are tenant-scoped
-// (optional tenant_id) and carry billing-plan + MFA flags. Subject
-// status is derived elsewhere (subjects slice); customers signals a
+// (optional tenant_id) and carry billing-plan + MFA flags. Principal
+// status is derived elsewhere (principals slice); customers signals a
 // recompute when locked / verified state shifts.
 package customers
 
