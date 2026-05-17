@@ -7,6 +7,715 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-05-17
+
+### Added
+
+#### `engines/inventory_normalize.person` action (`internal/engines/inventory_normalize/actions/person/`)
+
+- New minimal normalize action that reads the lake batch, pulls
+  `external_id` + `payload.full_name`, upserts the `persons` table
+  directly via `ctx.Tx`. Wires `dataset_type=person` end-to-end
+  through `inventory_import` (added to the dataset whitelist) so
+  the Lens CSV demo can hit it synchronously.
+- Registered in `cmd/backplane/main.go` alongside the other
+  normalize actions.
+
+#### `engines/inventory_import` — synchronous CSV-import façade (`internal/engines/inventory_import/`)
+
+- New endpoint `POST /api/v0/inventory/import`. Body:
+  `{source, dataset_type, correlation_id?, records[]}`. Response:
+  `{ingest: {…verbatim ingest counters…}, normalize: {…action result…}}`.
+  Status codes: 200 on success, 400 on envelope validation
+  failures, 500 otherwise.
+- Pipeline inside one request:
+  1. `inventory_ingest.Process` with `SkipEvent=true` — writes
+     lake + audit row, MQ trigger is suppressed so the async
+     pipeline does not race against the same batch.
+  2. Look up the normalize action for `dataset_type` against the
+     internal whitelist (`employee`, `account`, `orgunit`,
+     `access_grant_record`). Unknown values rejected.
+  3. Dispatch the action via `actionReg.Dispatch` inside a single
+     `bun.DB.RunInTx`. Action failure rolls back every PG write.
+- `inventory_ingest.Request` extended with `SkipEvent bool`. Default
+  `false` keeps existing callers (HTTP `/ingest`, MQ consumer)
+  emitting the event as before; `inventory_import` is the only
+  caller that flips it true.
+- Wired into `cmd/backplane/main.go` alongside the other
+  RegisterRoutes calls. Async path (`/ingest` + MQ + pipelines)
+  remains untouched.
+
+#### `engines/access_generate.run` action + wiring (`internal/engines/access_generate/actions/run/`, `cmd/backplane/main.go`)
+
+- New orchestrator action `access_generate.run` — thin wrapper that
+  parses `principal_id` + optional `application_id` / `capability_id`
+  from pipeline args, calls `Engine.Recompute`, returns counters.
+  Pipeline YAML:
+  ```yaml
+  steps:
+    - name: regenerate
+      engine: access_generate
+      action: run
+      args:
+        principal_id: "{{ event.principal_id }}"
+  ```
+- Engine wired in `cmd/backplane/main.go`: constructs the
+  `capabilities.Repository` (new — see below) and the new
+  `initiatives` repository, then builds `access_generate.Engine`
+  against the existing principals / employments / org_units /
+  applications repositories and registers the action in the
+  orchestrator registry.
+- `Engine.EventSink` aliased to `events.Sink` so the composition
+  root passes its real sink in directly — no adapter shim.
+  `Recompute` stamps a single `correlation_id` on every envelope it
+  publishes in one pass, so consumers can tie all creates / tombstones
+  from one run together.
+
+#### `inventory/capabilities` — read-side repository (`internal/inventory/capabilities/repository.go`)
+
+- `Repository` interface with `GetByID(ctx, uuid)` and
+  `GetBySlug(ctx, string)`. `BunRepository` implementation;
+  `ErrNotFound` returned for missing rows. Catalog mutation surfaces
+  stay where the catalog import flow lives — this slice exposes
+  read paths only.
+
+#### `engines/access_generate` — generative observer (`internal/engines/access_generate/`)
+
+- `inheritance.go` fully wired: Principal (kind=employment) →
+  Employment (IsActiveAt now) → OrgUnit → walk parent chain →
+  distinguished name (`corp/europe/engineering`). Match
+  `rule.SourceOrgUnitDN` exactly (prefix-match TBD).
+- `expandGrant` resolves `application_slug` via
+  `applications.GetByCode` and optional `capability_slug` via
+  `capabilities.GetBySlug`; populates `Justification` with
+  `source_rule_id`, `source_org_unit_dn`, and `capability_slug`
+  when present.
+- `buildOrgUnitDN` walks up to 64 levels deep (safety cap), joins
+  names with `/`.
+- Pure-function unit tests: 8 for `diff` (covering empty inputs,
+  all-new, all-removed, match-noop, same-target-different-rules,
+  account-vs-grant distinct keys, partial overlap, empty
+  source_rule_id matching) + 6 for `ParseInheritanceRule` (happy,
+  empty body, missing dn, no grants, missing application_slug,
+  malformed types).
+
+#### `engines/access_generate` — generative observer skeleton (`internal/engines/access_generate/`)
+
+- Single entry point `Engine.Recompute(ctx, principalID, RecomputeFilter)`.
+  Every trigger (Journey pipeline action, beat-scheduled pass,
+  ad-hoc REST call) reduces to a Recompute call. `RecomputeFilter`
+  narrows scope by application_id / capability_id; empty filter
+  rebuilds the whole (principal, ∀ apps, ∀ capabilities) scope.
+- Three sources fan into a single `[]plannedInitiative`:
+  - `inheritance` — cartridge rules (`Mechanism == "inheritance"`)
+    against the principal's Employment + OrgUnit. Rule loading via
+    `cartridges.Provider.Policies(BundleRef)` — never walks the
+    filesystem directly. Rule body shape:
+    `{source_org_unit_dn, grants: [{application_slug, capability_slug?}]}`.
+    Skeleton stops short of DN-walking + slug → id resolution —
+    marked TODO in `inheritance.go`.
+  - `requested` — stub with detailed contract comments. Reads
+    approved ITSM requests once the ITSM Gateway lands; returns nil
+    today.
+  - `delegated` — stub, same shape. Reads active delegations from the
+    ITSM Gateway when ready; returns nil today.
+- Diff key `(kind, application_id, capability_id, source_rule_id)`;
+  `source_rule_id` travels in `Justification`. Two rules accidentally
+  pointing at the same target produce two separate initiatives —
+  matches the user's "access ⇐ any single active justification".
+- Transactional: collect → filter → load current → diff → Create +
+  Tombstone all run inside one `bun.DB.RunInTx`. MQ events
+  (`inventory.initiative.created`, `inventory.initiative.tombstoned`)
+  are staged inside the tx and published after commit so a broker
+  outage cannot leave subscribers ahead of the DB.
+- Topic constants `TopicInitiativeCreated`,
+  `TopicInitiativeTombstoned` exported for the future `access_validate`
+  and `access_promote` engines to subscribe by symbol.
+
+#### `inventory/initiatives` — desired-state audit slice (`internal/inventory/initiatives/`, migration `20260513100000`)
+
+- New `initiatives` table holds the justification behind every
+  desired-state decision. Target shape: `capability_id IS NULL` →
+  account-initiative ("principal needs an account in this
+  application"); `capability_id IS NOT NULL` → grant-initiative
+  ("principal needs this capability").
+- Multiple active initiatives per target are normal — access ⇐ any
+  single active justification. No partial unique index on the
+  active set.
+- Audit-only: rows are **never** deleted. Closure is expressed by
+  stamping `tombstoned_at`. No `closed_by`, no `closure_reason` —
+  the source of the justification is revoked in its own system
+  (org-unit transfer, request cancellation), the platform reacts
+  by tombstoning the initiative.
+- Repository (`internal/inventory/initiatives/repository.go`):
+  `Create` / `Tombstone` / `GetByID` / `List`. No `Delete` method
+  by design. `Tombstone` is idempotent — repeat calls on an
+  already-tombstoned row return nil; `ErrNotFound` only surfaces
+  when the id does not exist.
+- `ListFilter` supports filters on principal / application /
+  capability plus mutually-exclusive flags `AccountInits /
+  GrantInits` and `ActiveOnly / TombstonedOnly`, plus `Kind`.
+- Kind values closed list: `KindInheritance` (from org-unit today,
+  project later), `KindRequested` (approval workflow), `KindDelegated`.
+  Grace-period extensions are not a separate kind — they are
+  expressed as a follow-up initiative with a bounded `valid_until`
+  or as `valid_until` being pushed out on an existing row.
+- `valid_from` and `valid_until` columns carry the planned validity
+  window. `valid_from` defaults to NOW() on insert (column default
+  + Go fallback in `Repository.Create`); `valid_until` NULL means
+  open-ended. `Initiative.IsActiveAt(t)` / `IsActive()` combine the
+  window check with the tombstone check; `ListFilter.ActiveOnly`
+  does the same in SQL.
+
+#### `inventory/accounts` — three-column state machine (`internal/inventory/accounts/`, migration `20260513090000`)
+
+- New columns `desired_state`, `validated_state`, `effective_state` on
+  the `accounts` table. Vocabulary: `not_exist / pending / blocked /
+  invited / active`, enforced by per-column CHECK constraints.
+  Defaults to `pending` so new rows always satisfy the constraint.
+- Backfill: existing rows derive `effective_state` from `is_active`
+  (true → `active`, false → `blocked`); `desired_state` and
+  `validated_state` start as `pending` so generative and the PDP
+  validator assess each row on the next pass.
+- Indexes: single-column index on each state column plus the
+  composite `ix_accounts_state_divergence (application_id,
+  validated_state, effective_state)` for the access_apply working-set
+  scan (`validated_state <> effective_state`).
+- Repository: single-writer setters `SetDesiredState`,
+  `SetValidatedState`, `SetEffectiveState` so each column has a
+  clearly-owned writer. `Upsert` writes `effective_state` on
+  conflict (connector data tells us what *is*) but leaves the other
+  two columns untouched.
+- `ListFilter` extended with `DesiredState`, `ValidatedState`,
+  `EffectiveState` filters plus a `NeedsApply` shortcut for
+  `validated_state <> effective_state`.
+- `inventory_normalize.account` now derives `EffectiveState` from
+  the connector-supplied `status` / `is_active` payload at write
+  time, so freshly ingested accounts land with a correct
+  effective state instead of the `pending` default.
+- Canonical state constants exported as `accounts.StateNotExist /
+  StatePending / StateBlocked / StateInvited / StateActive`.
+
+#### App cartridge HTTP surface (`internal/core/cartridges/routes.go`, `internal/core/descriptor/routes.go`)
+
+- `GET /api/v0/cartridges/{id}/apps` — list app cartridges in the
+  bundle. Each entry carries id, name, version, target connector,
+  states count, descriptor fields count.
+- `GET /api/v0/cartridges/{id}/apps/{app_id}` — full app cartridge
+  (manifest + account state machine + descriptor recipe). Server-local
+  `BasePath` is suppressed in JSON output.
+- `POST /api/v0/cartridges/{id}/apps/{app_id}/descriptor` — render the
+  descriptor for a (principal, target_state) pair. Request body lets
+  callers overlay manifest config values via `application`; keys not
+  overridden fall through to the cartridge defaults. Status codes:
+  200 success / 400 missing target_state / 404 unknown bundle or app
+  / 422 render failure (template, transform, resolver) / 500 compile
+  failure (cycle, undeclared ref, unknown transform).
+- The render endpoint lives in `core/descriptor` to keep the
+  dependency direction one-way (`descriptor → cartridges`).
+- Wired into `cmd/backplane/main.go` alongside the existing
+  `cartridges.RegisterRoutes`.
+
+#### `core/descriptor` — app descriptor renderer (`internal/core/descriptor/`)
+
+- `Renderer` compiles an `AppCartridge.Descriptor` recipe once and
+  renders the per-state descriptor for as many (principal, target
+  state) pairs as needed. Safe for concurrent use after construction.
+- Bindings exposed to every template: `.Principal` (arbitrary
+  inventory record), `.Application` (typically `manifest.Config`),
+  `.Descriptor` (cross-field references to already-rendered fields).
+  Templates are strict — `missingkey=error` makes a reference to an
+  undefined key fail loudly instead of producing `<no value>`.
+- Post-template transforms pipeline: `lower`, `upper`,
+  `remove_diacritics` (NFD + drop combining marks), `truncate:N`
+  (rune-aware, never splits multibyte sequences). Same `lower` /
+  `upper` are also reachable from inside templates via FuncMap.
+- `ResolverRegistry` resolves `on_collision`. The default
+  `StubResolver` returns the value unchanged so the renderer is
+  exercisable end-to-end before the database-backed collision
+  handlers are wired. Unknown resolver names fall back to the stub.
+- Cross-field references (`{{ .Descriptor.<name> }}`) are extracted
+  at compile time and topologically sorted; cycles and references
+  to undeclared fields are rejected by `NewRenderer`, not at render
+  time. Sort is deterministic (alphabetical tiebreak).
+- `by_state` recipes with no entry for the target state are omitted
+  from the result entirely (rather than set to nil). YAML scalar
+  values inside `by_state` (e.g. `userAccountControl.active: 512`)
+  pass through with their original type — no template execution, no
+  transforms.
+
+#### `core/cartridges` — app cartridge loader (`internal/core/cartridges/apps.go`)
+
+- New `apps/` subdir convention inside a bundle:
+  `<bundle>/apps/<app_id>/{manifest.yaml,account.yaml,descriptor.yaml}`.
+  Each directory describes one integrated application — identity
+  (`manifest.yaml`), account state machine (`account.yaml`), and
+  per-state descriptor recipe (`descriptor.yaml`).
+- `AppCartridge`, `AppManifest`, `AccountStateMachine`,
+  `AccountTransition`, `Descriptor`, `DescriptorField` typed
+  projections of the three YAML files.
+- `Provider.Apps(ref) (map[string]AppCartridge, error)` lists every
+  app cartridge in the bundle. `FilesystemProvider` implements it
+  with a flat scan of `apps/`, hidden entries skipped, missing
+  subdir tolerated.
+- Cross-file validator: `manifest.id` matches directory name,
+  `manifest.connector` non-empty, `account.initial_state` is one of
+  `states`, every `transition` references known states, every
+  descriptor field is exclusively template-shaped or by_state-shaped,
+  every `by_state` key references a known state. Failures wrap
+  `ErrInvalidApp`.
+- Initial app cartridge lives in the existing `popular` bundle at
+  `<cartridges-root>/popular/apps/microsoft_ad/` (Microsoft Active
+  Directory). Five-state account machine, descriptor for
+  `userPrincipalName` / `samAccountName` / `mail` / `displayName` /
+  `ou` / `distinguishedName` / `userAccountControl`, including
+  `username_numeric_suffix` collision resolver and by-state OU +
+  `userAccountControl` bitmask.
+- README files explaining the `apps/` layer convention plus the
+  per-app README live alongside the cartridge content in the
+  cartridges repo, not inside the backplane subrepo.
+
+#### `engines/policy_assessment/mechanisms/sod` — Segregation-of-Duties handler (`internal/engines/policy_assessment/mechanisms/sod/`)
+
+- Detects toxic combinations of capabilities held by a single
+  principal. Rule body shape (parsed from `Manifest.Body`):
+  `{"conditions": [{"capability_slugs": [...], "min_count": N},
+  ...]}`. Every condition must satisfy its `min_count` against the
+  principal's `CapabilitySlugs` set for the rule to fire — partial
+  matches do not surface a finding.
+- `Prepare` JSON-roundtrips the body through a typed `[]condition`
+  slice, rejecting empty `conditions`, empty `capability_slugs`, or
+  `min_count <= 0` so the catalogue never ships a rule that can
+  never fire. Parsed conditions are cached per
+  `<cartridge>/<rule_id>`.
+- `Evaluate` reads `req.Facts.Principal.CapabilitySlugs`, intersects
+  each condition deterministically, and emits the Decision when
+  every condition meets `min_count`. Output shape:
+  - `Decision.Effect` empty (this is an anomaly, not a gate).
+  - `Decision.RiskLevel` = `"high"` for now; future revisions may
+    scale by privilege level of matched capabilities.
+  - `Decision.Signals` polymorphic — `"sod_conflict"` string code +
+    a structured dict `{"kind": "sod_conflict", "principal": ...,
+    "conditions": [{"required": [...], "min_count": N, "matched":
+    [...]}, ...]}`.
+  - `Decision.Reasons` carries `rule_id`, `rule_kind: "anomaly"`,
+    `matched_conditions`, `fact_values`
+    (`principal.capability_slugs`), and `produced.matched_per_condition`.
+- `scope_mode` (`global` / `per_application` / `by_scope_key`) is
+  not honoured in this revision — the engine input does not carry
+  per-grant scope context yet. Conditions evaluate over the full
+  CapabilitySlugs set as if `scope_mode: global`.
+- 5 unit tests: all conditions met fires with polymorphic signal +
+  structured payload, single-condition shortfall does not fire,
+  `min_count > 1` requires that many matches, nil/empty principal
+  is graceful (no panic, no fire), Prepare rejects empty / malformed
+  bodies.
+- Wired in `cmd/worker/main.go` alongside `opa` and `cedar` handlers
+  via `sodmech.New()` → `policyDispatcher.Register(...)`. The SoD
+  handler is goroutine-safe and prepared once per snapshot reload
+  by the worker's `PrepareAll` pass.
+
+#### `engines/policy_assessment/actions/assess` — policy-assessment action + first end-to-end demo cartridges (`internal/engines/policy_assessment/actions/assess/`, `cartridges/popular/`)
+
+- `policy_assessment.assess` action — orchestrator-registrable unit
+  of work. One invocation = one assessment run row. The action walks
+  the active accounts population (`accounts.Repository.List`, new
+  method exposing a paginated snapshot keyed off `bun.IDB`), builds
+  `Facts` per account, dispatches every applicable policy through
+  the engine, and writes one finding row per matched policy.
+- Args: `triggered_by`, optional `application_id` scope narrowing,
+  `mechanisms` allowlist, `created_by` audit field. Result:
+  `assessment_run_id` plus counters
+  (`accounts_evaluated`/`policies_applied`/`matched`/
+  `findings_created`/`findings_reused`).
+- Idempotency: `evidence_hash` is a stable SHA-256 of
+  `(cartridge_ref, rule_id, account_id, first_string_signal)`.
+  A re-run that produces the same finding hits the DB unique
+  constraint on the evidence tuple; the action catches the
+  duplicate-key signal (PG SQLSTATE 23505 / constraint name
+  `uq_findings_evidence`) and increments `findings_reused` instead
+  of failing.
+- Finding kind defaults to the first string entry in
+  `Decision.Signals` — the kernel convention — falling back to
+  manifest rule_id, then "anomaly". Severity prefers the manifest's
+  static value and falls back to `Decision.RiskLevel`. Account
+  anchor populates `account_id`; principal anchor stays nil for now
+  (account-only assessments).
+- Worker composition root (`cmd/worker/main.go`) wires the engine:
+  `policy_assessment.Store` boot-loaded from the cartridges
+  provider, dispatcher with `opa` + `cedar` handlers registered,
+  `PrepareAll` over the snapshot, then `assess.Register` injecting
+  store + dispatcher + repos for accounts, assessment_runs, and
+  findings.
+- First end-to-end demo cartridges (`cartridges/popular/`):
+  - `pipelines/policy_assessment.yaml` — one-step pipeline,
+    schedule trigger `every: 1h`, calls
+    `policy_assessment.assess` with passthrough args.
+  - `policies/access_risk/privileged_accounts.{meta.json,rego}` —
+    OPA-mechanism cartridge. Surfaces every account flagged
+    `account_is_privileged=true` as a finding with `risk_level:
+    medium`, `signals: ["privileged_account"]`, reasoned audit
+    payload. Tags `["assessment", "scope:account",
+    "resource:Account", "account:privileged"]` line up with the
+    facets the action emits per account.
+
+#### `engines/policy_assessment/mechanisms/opa` — Rego predicate evaluator (`internal/engines/policy_assessment/mechanisms/opa/`)
+
+- Embedded OPA (`github.com/open-policy-agent/opa@v1.17.0`) is back in
+  the dependency tree, in-process eval via `rego.PreparedEvalQuery`,
+  no sidecar. Cedar stays for AuthZ gates; OPA covers anomaly findings
+  + generative rules (orphan accounts, terminated access, birthright
+  joiner, leaver grace).
+- `Handler.Prepare` reads the sibling `.rego` file (default name =
+  manifest basename with `.rego`; override via `body.policy_file`),
+  parses the module via `ast.ParseModule` to extract the package path,
+  and compiles a `PreparedEvalQuery` targeting `data.<package>`. The
+  cache is keyed by `<cartridge_ref>/<rule_id>` and refreshed on every
+  Prepare so a reloaded policy supersedes the previous version.
+- `Handler.Evaluate` marshals `Facts` through JSON into the
+  snake_case input shape the kernel `RULE_CONTRACT.md` documents
+  (`input.principal`, `input.target`, `input.action`,
+  `input.context`, `input.threat`, `input.now`, …) and runs the
+  prepared query. The result map is split into `decision` and
+  `projected_facts`, mapped 1-to-1 to
+  `policy_assessment.RuleResult`:
+  - `Decision.Effect` / `RiskLevel` / `Reasons` are typed.
+  - `Decision.Signals` and `ProjectedFact.Signals` stay polymorphic
+    `[]any` — string codes and structured dicts coexist in the same
+    list, matching the kernel `Signal = str | dict` union.
+  - `ProjectedFact.Target` re-encodes through JSON so snake_case Rego
+    output populates the typed `TargetFacts` struct.
+  - `ProjectedFact.ValidFrom` / `ValidUntil` parse RFC 3339 strings.
+- `Matched` flips true when the policy fires (`Decision != nil` or
+  `len(ProjectedFacts) > 0`); a rule whose body did not satisfy
+  returns `Matched=false` with a nil Decision and empty
+  ProjectedFacts — the dispatcher / caller treats this as "policy not
+  applicable", not as a deny.
+- `handler_test.go` covers five cases: reactive gate allow (kernel
+  RULE_CONTRACT case 2), reactive anomaly with polymorphic signals
+  mixing a string code and a structured `{"kind": ..., "extra": ...}`
+  dict (kernel case 1), generative birthright with two projected
+  facts (kernel case 3), no-match (rule body unsatisfied), and
+  explicit `body.policy_file` override.
+
+#### `inventory/findings` + `inventory/policy_assessment_runs` — persistence for policy-assessment output (`internal/inventory/{findings,policy_assessment_runs}/`)
+
+- New migration `20260508100000_findings_and_assessment_runs` creates
+  two tables in one transaction with `UUID` primary keys.
+- `policy_assessment_runs` — one row per policy-assessment pass.
+  Carries `status` (pending / running / completed / failed) and
+  `triggered_by` (manual / api / schedule) as `VARCHAR(32)` with
+  `CHECK` constraints; scope narrowing via optional
+  `scope_principal_id` / `scope_application_id` FKs; counters
+  `findings_total`, `findings_by_severity` (`jsonb`),
+  `findings_created_count`, `findings_reused_count`; operator
+  timestamps `started_at` / `completed_at` / `created_at` with
+  terminal-state and pending-state `CHECK`s.
+- `findings` — one row per detected violation or anomaly. References
+  `policy_assessment_runs(id)` via `assessment_run_id` (required)
+  plus optional anchors `principal_id` → `principals(id)`,
+  `account_id` → `accounts(id)`, `policy_id` → `policies(id)`,
+  `scope_key_id` → `capability_scope_keys(id)`. `kind` is a free
+  `VARCHAR(64)` — vocabulary owned by the emitting policy.
+  `severity` and `status` are `VARCHAR(32)` with `CHECK` constraints
+  (`critical/high/medium/low` and
+  `open/acknowledged/resolved/mitigated`).
+  `matched_capability_grant_ids`, `matched_effective_grant_ids`,
+  `matched_access_fact_ids` are `jsonb` lists. `evidence_hash` is the
+  canonical idempotency key, baked into a `UNIQUE NULLS NOT DISTINCT`
+  constraint over `(kind, principal_id, account_id, policy_id,
+  scope_key_id, scope_value, evidence_hash)`. `active_mitigation_id`
+  / `proposed_mitigation_id` are plain `UUID` columns with no FK; the
+  constraint lands when the mitigations slice ships. `CHECK
+  ck_findings_principal_or_account` enforces at least one anchor.
+- Indexes: `ix_findings_principal_status`,
+  `ix_findings_policy_status`, `ix_findings_kind_status_detected`,
+  `ix_findings_severity_status`, `ix_findings_active_mitigation_id`,
+  `ix_findings_proposed_mitigation_id`, `ix_findings_assessment_run_id`.
+  Same idea for `policy_assessment_runs`: status, scope,
+  `created_at DESC`.
+- Both slices follow the standard pattern: `doc.go`, `errors.go`,
+  `model.go`, `repository.go` (bun-backed with an in-process mock
+  for tests), `routes.go`, `routes_test.go`. Repository interfaces
+  expose `GetByID` / `List` (paginated, filtered) plus write methods
+  reserved for the future policy-assessment action — `Insert` /
+  `Update` on assessment runs, `Insert` on findings.
+- Read-only HTTP surface, mounted on `/api/v0`:
+  - `GET /policy-assessment-runs` (filters: `status`,
+    `triggered_by`, `scope_principal_id`, `scope_application_id`,
+    `limit`, `offset`), `GET /policy-assessment-runs/:id`.
+  - `GET /findings` (filters: `principal_id`, `account_id`,
+    `policy_id`, `assessment_run_id`, `kind`, `status`, `severity`,
+    `limit`, `offset`), `GET /findings/:id`.
+  - No `POST` / `PATCH` / `DELETE`: findings are written by the
+    policy-assessment action (next milestone), status transitions
+    will arrive through dedicated action endpoints in their own
+    slice.
+- Both slices wired in `cmd/backplane/main.go` alongside the existing
+  policies and pipelines mirrors.
+
+#### `engines/policy_assessment` — engine + dispatcher + Cedar mechanism + kernel `RULE_CONTRACT` mirror (`internal/engines/policy_assessment/`)
+
+- Single engine, one dispatcher, N mechanism handlers. Callers
+  (`cmd/pdp` AuthZen transport, future policy-assessment action in `cmd/worker`)
+  build a `policy_assessment.Request` (carrying typed `Facts`) and
+  dispatch by Mechanism. Handlers return a uniform `Output` carrying
+  a `RuleResult` (kernel-canonical: `Decision` and/or
+  `ProjectedFacts`) plus engine-side diagnostics (Matched + Signals +
+  Evidence + Confidence + Payload); aggregation rules belong to the
+  caller, not the engine.
+- `schemas.go` mirrors the kernel rule contract
+  (`aurelion-kernel/src/engines/policy_assessment/RULE_CONTRACT.md`)
+  1-to-1: `RuleResult{Decision?, ProjectedFacts[]}`,
+  `Decision{Effect, RiskLevel, Signals, Reasons}`,
+  `ProjectedFact{Target, Initiative, ValidFrom, ValidUntil,
+  DesiredState, RiskLevel, Signals, Reasons}`, `Reason`, `Facts`
+  with typed sub-sections (`PrincipalFacts`, `TargetFacts`,
+  `ContextFacts`, `PrincipalContextFacts`, `ThreatFacts`,
+  `OwnerFacts`, `InitiativeFact`). Go-side adds two transport
+  extensions for Cedar / REST AuthZ: `Resource{Type, ID, Properties}`
+  and `EntityRecord{UID, Attrs, Parents}` — these have no kernel
+  counterpart because the kernel never had a Cedar mechanism.
+- Rule-level `Signals` is **polymorphic `[]any`** — each entry is
+  either a plain string code (`"orphaned_account_recent_login"`) or
+  a structured dict (`{"kind": "sod_conflict", ...}`) — mirroring
+  the kernel `Signal = str | dict[str, Any]` union. Engine-side
+  Output exposes a typed `AssessmentSignal{Code, Severity, Message,
+  Payload}` for dispatcher telemetry; it is **not** part of the
+  rule contract.
+- Terminology: the actor is `Principal` everywhere in the Aurelion
+  contract (`Facts.Principal`, `PrincipalFacts`,
+  `PrincipalContextFacts`, `TargetFacts.PrincipalID`). AuthZen wire
+  format calls it `subject`; the transport layer translates it in
+  `buildFacts`.
+- `Store` is the in-memory catalogue — `Reload(provider)` rebuilds
+  via `cartridges.Provider`, swapped via `atomic.Pointer`. Reads
+  (`All`, `SelectByFacets`, `SelectByMechanism`) are lock-free.
+  `RunStoreWatcher` polls `.meta.json` / `.cedar` / `.prompt`
+  mtimes (default 5 s) and triggers reload on diff; failures leave
+  the previous snapshot in effect.
+- **Tag-based pre-filter** is the contract for coarse policy
+  selection. Manifest grows a `tags []string` field; the request
+  caller derives "facets" (action / resource type / principal type +
+  caller-supplied context); `SelectByFacets` keeps every entry whose
+  `Manifest.Tags` are a subset of facets. An untagged policy matches
+  every request by default. Implemented as a column on the PG
+  `policies` mirror too (`text[]` + GIN index, migration
+  `20260508090000_policies_tags`).
+- `mechanisms/cedar` handler — backed by `github.com/cedar-policy/cedar-go`.
+  Reads a sibling `.cedar` text file (default name = manifest
+  basename, override via `body.policy_file`), compiles a Cedar
+  PolicySet at Prepare-time, runs `IsAuthorized` per Evaluate.
+  Result mapping is semantics-correct:
+  - Allow + Reasons ≠ ∅ → effect=allow.
+  - Deny + Reasons ≠ ∅ → effect=deny (a forbid policy fired).
+  - Deny + Reasons = ∅ → "not applicable" (no Decision emitted);
+    the aggregator does not treat this as a verdict.
+- Cedar handler reads from `Request.Facts`: `Principal` (auto-built
+  as Cedar entity with attrs `is_active = (Status == "active")`,
+  `mfa_enabled`, `tenant_id`, `email_verified`, …), `Action` →
+  `Action::"<name>"` UID, `Resource` (falls back to
+  `Target.ResourceType+Resource`), `Context` + `Threat` flattened
+  into the Cedar Context Record, `Entities` mounted as graph for
+  ABAC / ReBAC `in`-checks. Diagnostic reasons map to
+  `Reason{RuleID, RuleKind, Produced: {cedar_policy_id, position}}`.
+
+#### `cmd/pdp` — AuthZen 1.0 transport + Cedar wiring
+
+- `cmd/pdp/transport/authzen` — thin HTTP adapter:
+  1. Parse the AuthZen request envelope.
+  2. Derive facets — `["authz", "action:<name>", "resource:<type>",
+     "principal:<subject.type>"]` plus flattened `context.*` (nested
+     map values join with `:`). AuthZen wire calls the actor
+     `subject`; the facet is normalized to `principal:` to match the
+     Aurelion contract.
+  3. `Store.SelectByFacets(facets)` — coarse pre-filter; tags ⊆
+     facets ⇒ candidate.
+  4. `buildFacts(req)` translates the AuthZen envelope into a
+     `policy_assessment.Facts`: `req.Subject` → `Facts.Principal`
+     (with typed mapping for `status` / `org_unit` / `tenant_id` /
+     `mfa_enabled` / `email_verified`, the rest into
+     `Principal.Attributes`); `context.entities` → `Facts.Entities`;
+     `context.transport` / `country` / `ip` → `ContextFacts`.
+  5. Dispatch each candidate through the engine dispatcher.
+  6. Aggregate per AuthZen rules: deny-wins; ≥1 allow with no deny
+     → allow; otherwise default deny. Obligations are not part of
+     the kernel rule contract; `Response.Context.Obligations` stays
+     in the AuthZen wire shape but is left empty (transports may
+     populate it by extracting structured signals from
+     `Decision.Signals` matching `{"kind": "obligation", ...}`).
+  7. Marshal `Response` with `decision` + `context.{reasons,
+     obligations, rules_count}`.
+- `cmd/pdp/main.go` wired through: dispatcher, `Store` boot-load +
+  watcher goroutine, prepare poller (re-runs `Prepare` against the
+  current snapshot every tick), AuthZen transport mounted on
+  `POST /access/v1/evaluation`. `GET /healthz` reports
+  `policies_total`, `policies_per_mech`, `handlers`.
+
+#### `policies` + `pipelines` PG mirror with cartridge sync (`internal/inventory/{policies,pipelines}/`, `internal/core/{policies,pipelines}/`)
+
+- New inventory tables `policies` and `pipelines` mirror the
+  current set of cartridge-defined rules and pipeline
+  definitions. Cartridges remain the source of truth; the
+  tables are projections rebuilt by the backplane sync loop
+  so callers (Studio, future REST query surfaces) can
+  reference rules / pipelines by stable id without walking
+  the cartridge tree. Rego bodies and pipeline YAMLs are
+  NOT mirrored — only metadata.
+- Natural key `(cartridge_ref, rule_id)` for policies and
+  `(cartridge_ref, name)` for pipelines. Mechanism is a
+  free-form `VARCHAR(64)` that names a class-of-evaluation
+  handler (cedar / sod / risk_scoring / llm_classification /
+  graph_analysis / …); no enum on the platform layer.
+- Soft-delete semantics: when a cartridge stops shipping a
+  rule / pipeline, the sync loop sets `is_active=false` and
+  stamps `removed_at`. The row stays — findings already in
+  flight can still reference it. Bringing the rule back
+  resurrects the same id in place via
+  `ON CONFLICT ... DO UPDATE`.
+- `core/policies.Manager` and `core/pipelines.Manager` own
+  the reconciliation passes; each `RunSyncLoop(ctx, db,
+  interval)` wraps every tick in a `pg_try_advisory_lock`
+  so N backplane replicas can all tick on schedule and only
+  one reconciles — same pattern as
+  `orchestrator/beat`. Default cadence: 5 s.
+- Read-only HTTP surface for both projections:
+  - `GET /api/v0/policies` (filters: `cartridge_ref`,
+    `mechanism`, `include_inactive`, `limit`, `offset`);
+    `GET /api/v0/policies/:id`.
+  - `GET /api/v0/pipelines` (filters: `cartridge_ref`,
+    `include_inactive`, `limit`, `offset`);
+    `GET /api/v0/pipelines/:id`.
+  - No `POST` / `PATCH` / `DELETE`: every change lands via
+    a cartridge edit picked up by the next sync tick.
+
+#### `core/cartridges/watcher.go` — mtime-based change detector (`internal/core/cartridges/`)
+
+- New `cartridges.Watcher` polls the cartridges root and
+  reports when any tracked file's mtime, presence, or
+  identity differs from the previous scan. `Run(ctx,
+  interval, onChange)` seeds the state on the first tick
+  (no reload) and invokes the callback on every subsequent
+  diff. Failures are logged; the previous catalogue stays
+  in effect. Suffix filter (`.rego`, `.meta.json`,
+  `.yaml`, …) lets each consumer narrow what counts as a
+  "change" for them. Default cadence: 5 s.
+- Per-process reload paths wired up:
+  - `orchestrator.RunCatalogWatcher` rebuilds the pipeline
+    catalog in `cmd/worker` and `cmd/backplane` when
+    cartridge YAML changes. The catalog itself gains
+    `Catalog.Reload(provider, loader, ids)` plus internal
+    `sync.RWMutex` so Get / All / Sources stay
+    goroutine-safe across the swap.
+  - Future mechanism-hosting processes (Cedar PDP, scan
+    workers) wire their own watchers using the same helper.
+- No MQ events on cartridge changes — mtime polling at 5 s
+  is enough for the design baseline. PG mirror sync and
+  per-process catalog reload tick independently; no
+  coordination needed.
+
+#### `engines/policy_assessment` — single engine, dispatched per mechanism (`internal/engines/policy_assessment/`)
+
+- One engine, one dispatcher, many mechanisms — each mechanism owns
+  one class-of-evaluation problem end-to-end (manifest body schema,
+  backing infrastructure, native result → `policy_assessment.Output`
+  translation, where Output carries a `RuleResult`).
+- Mechanism index — every entry is a README contract; no Go
+  implementation yet:
+  - `cedar` — Cedar policies for AuthZ (RBAC + ABAC + ReBAC
+    in one language). Author writes Cedar text in a sibling
+    `.cedar` file; backend is `cedar-go`.
+  - `sod` — Segregation of Duties; DB-backed combinatorial
+    evaluator, pure Go.
+  - `risk_scoring` — Signal collectors + weighted
+    aggregation + threshold tiers.
+  - `behavioral` — Baseline / anomaly score against a
+    sliding window.
+  - `llm_classification` — Prompt + retrieval + structured
+    LLM response (via `core/llm`).
+  - `graph_analysis` — Toxic-path / cycle / closure
+    traversal.
+  - `compliance_scorecard`, `quorum`, `windowed_threshold`
+    — placeholders.
+- Cartridge `Manifest` simplified to a mechanism-neutral
+  shape: `rule_id`, `version`, `name`, `mechanism`,
+  `severity`, `owner_team`, plus an open-ended `body`
+  (`map[string]any`) carrying mechanism-specific fields
+  (`policy_file` for cedar, `prompt_template_file` for LLM,
+  weights / thresholds for risk_scoring, etc.). Platform
+  layer no longer interprets body contents.
+- `Manifest.BasePath` carries the absolute path of the
+  `.meta.json` itself; mechanism handlers resolve their own
+  sibling files (`.cedar`, `.prompt`, …) from it. The
+  filesystem provider no longer requires (or knows about)
+  any specific sibling extension.
+- Sample Rego cartridges `sample_authz/` removed; the
+  reference path for AuthZ becomes Cedar text policies once
+  the `cedar` handler lands.
+
+### Removed
+
+- **`internal/core/opa/`** — Rego evaluator wrapper around
+  `github.com/open-policy-agent/opa/v1/rego`. The
+  `policy_assessment` engine targets domain-specific
+  mechanisms (cedar / sod / llm / graph / …) rather than a
+  generic Rego pipeline; OPA is no longer a dependency.
+- **`internal/engines/auth_decisions/`** — the previous
+  Rego-only PDP engine. Functionally absorbed by the future
+  `cedar` mechanism + an AuthZ runtime caller.
+- **`cmd/pdp/` reset to a skeleton.** The binary stays —
+  it remains the SLO-isolated host for AuthZ and AuthN.
+  All Rego / OPA / auth_decisions imports were stripped; it
+  now boots config + PG + RabbitMQ + cartridges and serves
+  `GET /healthz`. AuthZen evaluation and mechanism handlers
+  land when `cedar` and the other mechanisms are
+  implemented.
+- **`cartridges/popular/policies/sample_authz/`** — the two
+  Rego demo rules. Will be re-shipped as Cedar policies once
+  the `cedar` handler lands.
+- **`github.com/open-policy-agent/opa`** dropped from
+  `go.mod`; `go mod tidy` removed the transitive set.
+
+### Changed
+
+#### Orchestrator-owned action primitives (`internal/core/orchestrator/actions/`)
+
+- Moved `noop` package from `internal/actions/noop` to
+  `internal/core/orchestrator/actions/noop`. It is not test-only —
+  these are pipeline-shape primitives any cartridge may use.
+- Added three new primitives:
+  - `noop.fail` — deliberate handler error wrapping `ErrDeliberate`;
+    replaces the template-resolver hack in `smoke.fail.yaml`.
+  - `noop.constant` — returns an arbitrary JSON object verbatim;
+    stubs a producer step before the real action exists.
+  - `noop.emit` — publishes a domain envelope through
+    `ActionContext.Events`. Falls back to the pipeline run ID for
+    `correlation_id`. Non-idempotent: a retried dispatch produces
+    a fresh envelope with a new `event_id`.
+- `ActionContext` gains `Events events.Sink`. The runner threads it
+  through; handlers that don't emit are unaffected. Composition
+  root passes the sink at `runner.New`.
+- `cmd/worker` now declares the events exchange on the rabbitmq
+  connection and constructs an `events.NewMQ` sink — worker
+  becomes a first-class producer of domain envelopes alongside
+  backplane.
+- `smoke.fail.yaml` rewritten to use `noop.fail` honestly instead
+  of relying on an unfilled template raising at resolve time.
+
+#### Secret contracts collapsed into the platform package (`internal/platform/secretmanagers/`)
+
+- Removed `internal/core/secret/`. Its `Manager` / `Mutator` /
+  `FullManager` interfaces and `ErrNotFound` / `ErrNotImplemented`
+  sentinels moved into `internal/platform/secretmanagers/interface.go`.
+- Brings secrets in line with the other platform services (`siem`,
+  `storage`, `llm`) — every package holds its own contracts +
+  factory + one file per backend.
+- All consumers (`core/config/*`, every provider in
+  `platform/secretmanagers/`, `cmd/backplane/main.go`) updated.
+  Direction `core/config → platform/secretmanagers` is the
+  legitimate `core → platform` lean; nothing in `platform`
+  imports `core` upward.
+
 ## [0.5.0] — 2026-04-27
 
 ### Added

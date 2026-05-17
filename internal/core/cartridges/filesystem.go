@@ -82,6 +82,12 @@ func (p *FilesystemProvider) Materialize(ref Ref) (string, error) {
 }
 
 // Policies implements Provider.
+//
+// Each manifest's BasePath is filled in with the absolute path of the
+// .meta.json file (so handlers can resolve their own mechanism-specific
+// sibling files: .cedar, .prompt, .yaml, …). The platform layer makes
+// no assumption about which sibling files should or must exist —
+// that's the mechanism handler's job.
 func (p *FilesystemProvider) Policies(ref Ref) (map[string]Manifest, error) {
 	root, err := p.Materialize(ref)
 	if err != nil {
@@ -104,6 +110,7 @@ func (p *FilesystemProvider) Policies(ref Ref) (map[string]Manifest, error) {
 		if err != nil {
 			return err
 		}
+		m.BasePath = path
 		if existing, dup := out[m.RuleID]; dup {
 			return fmt.Errorf("%w: duplicate rule_id %q (in %q and %q)",
 				ErrInvalidManifest, m.RuleID, existing.Name, path)
@@ -113,6 +120,46 @@ func (p *FilesystemProvider) Policies(ref Ref) (map[string]Manifest, error) {
 	})
 	if walkErr != nil && !errors.Is(walkErr, fs.ErrNotExist) {
 		return nil, walkErr
+	}
+	return out, nil
+}
+
+// Apps implements Provider.
+func (p *FilesystemProvider) Apps(ref Ref) (map[string]AppCartridge, error) {
+	root, err := p.Materialize(ref)
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(root, appsSubdir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return map[string]AppCartridge{}, nil
+		}
+		return nil, fmt.Errorf("cartridges: read %q: %w", dir, err)
+	}
+	out := map[string]AppCartridge{}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		app, err := loadAppCartridge(filepath.Join(dir, name))
+		if err != nil {
+			return nil, err
+		}
+		if app.Manifest.ID != name {
+			return nil, fmt.Errorf("%w: %s: manifest.id %q does not match directory name %q",
+				ErrInvalidApp, app.BasePath, app.Manifest.ID, name)
+		}
+		if existing, dup := out[app.Manifest.ID]; dup {
+			return nil, fmt.Errorf("%w: duplicate app id %q (in %s and %s)",
+				ErrInvalidApp, app.Manifest.ID, existing.BasePath, app.BasePath)
+		}
+		out[app.Manifest.ID] = app
 	}
 	return out, nil
 }

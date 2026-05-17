@@ -281,20 +281,12 @@ Notes on SAP:
 - work with identity (`Person`, `Employment`) — that is
   [`employee`](../employee/)
 
-## Source of truth
+## Resolution boundary
 
-The algorithm is ported from the kernel's `CapabilityProjector`
-([src/inventory/access_model/capability_grants/capability_projector.py](../../../../../../aurelion-kernel/src/inventory/access_model/capability_grants/capability_projector.py)).
-
-Differences in backplane:
-
-- **Input entity renamed**: the kernel's `AccessFact` (plus an
-  intermediate `EffectiveGrant`) becomes a single `AccessGrantRecord`
-  in the lake. The intermediate layer is collapsed because there is
-  no Initiative concept on this side.
-- **Subject replaced by account**: in the kernel,
-  `EffectiveGrant.subject_id` pointed to an already-resolved
-  principal. Here, `AccessGrantRecord.account` is a raw user-mailbox;
-  the principal is attached by a separate engine after projection.
-  `CapabilityGrant` therefore carries `account_id`, not
-  `principal_id`.
+- Inputs are addressed by raw application identifiers: the lake row
+  carries an `account` username plus a resource descriptor read out
+  of `lake/access_artifact/`. No principal resolution happens here.
+- Output `CapabilityGrant` rows are keyed by `account_id`. Attaching a
+  principal to that account is the job of a downstream engine — the
+  projector never writes `principal_id` and never touches the
+  identity graph.

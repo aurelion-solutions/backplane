@@ -5,7 +5,7 @@
 // Command backplane is the single composition root for the
 // aurelion-backplane service. Wiring order:
 //
-//	envvars → secret.Factory → secret.Manager → config.Settings →
+//	envvars → secretmanagers.Factory → secretmanagers.Manager → config.Settings →
 //	logger → postgres.DB → rabbitmq.Conn → events sink → storage →
 //	siem → llm → connector RPC client → registration consumer →
 //	integrations + inventory services → webserver → serve.
@@ -31,38 +31,50 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
-	"github.com/aurelion-solutions/backplane/internal/actions/noop"
 	"github.com/aurelion-solutions/backplane/internal/core/cartridges"
 	"github.com/aurelion-solutions/backplane/internal/core/config"
+	"github.com/aurelion-solutions/backplane/internal/core/descriptor"
 	"github.com/aurelion-solutions/backplane/internal/core/events"
 	"github.com/aurelion-solutions/backplane/internal/core/logger"
 	"github.com/aurelion-solutions/backplane/internal/core/orchestrator"
+	"github.com/aurelion-solutions/backplane/internal/core/orchestrator/actions/noop"
 	"github.com/aurelion-solutions/backplane/internal/core/orchestrator/beat"
 	"github.com/aurelion-solutions/backplane/internal/core/orchestrator/loader"
 	"github.com/aurelion-solutions/backplane/internal/core/orchestrator/matcher"
 	"github.com/aurelion-solutions/backplane/internal/core/orchestrator/registry"
+	core_pipelines "github.com/aurelion-solutions/backplane/internal/core/pipelines"
+	core_policies "github.com/aurelion-solutions/backplane/internal/core/policies"
 	"github.com/aurelion-solutions/backplane/internal/core/postgres"
 	"github.com/aurelion-solutions/backplane/internal/core/rabbitmq"
 	"github.com/aurelion-solutions/backplane/internal/core/webserver"
+	"github.com/aurelion-solutions/backplane/internal/engines/access_generate"
+	access_generate_run "github.com/aurelion-solutions/backplane/internal/engines/access_generate/actions/run"
 	"github.com/aurelion-solutions/backplane/internal/engines/inventory_discover"
+	"github.com/aurelion-solutions/backplane/internal/engines/inventory_import"
 	"github.com/aurelion-solutions/backplane/internal/engines/inventory_ingest"
 	normalize_access_grant "github.com/aurelion-solutions/backplane/internal/engines/inventory_normalize/actions/access_grant_record"
 	normalize_account "github.com/aurelion-solutions/backplane/internal/engines/inventory_normalize/actions/account"
 	normalize_employee "github.com/aurelion-solutions/backplane/internal/engines/inventory_normalize/actions/employee"
 	normalize_orgunit "github.com/aurelion-solutions/backplane/internal/engines/inventory_normalize/actions/orgunit"
+	normalize_person "github.com/aurelion-solutions/backplane/internal/engines/inventory_normalize/actions/person"
 	"github.com/aurelion-solutions/backplane/internal/integrations/applications"
 	"github.com/aurelion-solutions/backplane/internal/integrations/connectors"
-	"github.com/aurelion-solutions/backplane/internal/transports/ingest_mq"
 	"github.com/aurelion-solutions/backplane/internal/inventory/accounts"
+	"github.com/aurelion-solutions/backplane/internal/inventory/capabilities"
 	"github.com/aurelion-solutions/backplane/internal/inventory/capability_grants"
 	"github.com/aurelion-solutions/backplane/internal/inventory/capability_mappings"
 	"github.com/aurelion-solutions/backplane/internal/inventory/customers"
 	"github.com/aurelion-solutions/backplane/internal/inventory/employee_provider_mappings"
-	"github.com/aurelion-solutions/backplane/internal/inventory/employment_record_matches"
 	"github.com/aurelion-solutions/backplane/internal/inventory/employee_records"
+	"github.com/aurelion-solutions/backplane/internal/inventory/employment_record_matches"
 	"github.com/aurelion-solutions/backplane/internal/inventory/employments"
+	"github.com/aurelion-solutions/backplane/internal/inventory/findings"
+	"github.com/aurelion-solutions/backplane/internal/inventory/initiatives"
 	"github.com/aurelion-solutions/backplane/internal/inventory/org_units"
 	"github.com/aurelion-solutions/backplane/internal/inventory/persons"
+	inv_pipelines "github.com/aurelion-solutions/backplane/internal/inventory/pipelines"
+	inv_policies "github.com/aurelion-solutions/backplane/internal/inventory/policies"
+	"github.com/aurelion-solutions/backplane/internal/inventory/policy_assessment_runs"
 	"github.com/aurelion-solutions/backplane/internal/inventory/principals"
 	"github.com/aurelion-solutions/backplane/internal/inventory/shared"
 	"github.com/aurelion-solutions/backplane/internal/inventory/workloads"
@@ -70,6 +82,7 @@ import (
 	"github.com/aurelion-solutions/backplane/internal/platform/secretmanagers"
 	"github.com/aurelion-solutions/backplane/internal/platform/siem"
 	"github.com/aurelion-solutions/backplane/internal/platform/storage"
+	"github.com/aurelion-solutions/backplane/internal/transports/ingest_mq"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	"github.com/uptrace/bun"
@@ -250,6 +263,7 @@ func run(log *slog.Logger) error {
 		Matches:  employment_record_matches.NewBunRepository(),
 	})
 	normalize_orgunit.Register(actionReg, normalize_orgunit.Deps{Lake: st})
+	normalize_person.Register(actionReg, normalize_person.Deps{Lake: st})
 	log.Info("action registry ready", slog.Int("actions", len(actionReg.All())))
 
 	// Action-ref validation is intentionally off while most engines
@@ -387,6 +401,28 @@ func run(log *slog.Logger) error {
 		Sink:     eventsSink,
 	})
 
+	// access_generate engine + run action -----------------------------
+	capabilitiesRepo := capabilities.NewBunRepository(db)
+	initiativesRepo := initiatives.NewBunRepository()
+	accessGenEngine, err := access_generate.New(access_generate.Deps{
+		Cartridges:   cartridgesProvider,
+		BundleRef:    cartridges.Ref{ID: "popular"},
+		Initiatives:  initiativesRepo,
+		Accounts:     accounts.NewBunRepository(),
+		Principals:   principalsRepo,
+		Employments:  empsRepo,
+		OrgUnits:     orgUnitsRepo,
+		Applications: appsRepo,
+		Capabilities: capabilitiesRepo,
+		DB:           db,
+		Events:       eventsSink,
+		Actor:        "engine:access_generate",
+	})
+	if err != nil {
+		return fmt.Errorf("access_generate engine: %w", err)
+	}
+	access_generate_run.Register(actionReg, access_generate_run.Deps{Engine: accessGenEngine})
+
 	// Connector registration consumer goroutine.
 	regChan, err := mq.Conn.Channel()
 	if err != nil {
@@ -474,11 +510,60 @@ func run(log *slog.Logger) error {
 		slog.String("queue", inventory_discover.DefaultSubscriberQueue),
 	)
 
+	// Cartridge mtime watcher — rebuilds the in-memory pipeline
+	// catalog when any cartridge YAML changes on disk. Backplane uses
+	// the catalog for beat schedule firing and matcher routing.
+	go orchestrator.RunCatalogWatcher(
+		ctx,
+		catalog,
+		cartridgesProvider,
+		pipelineLoader,
+		nil,
+		settings.Cartridges.Root,
+		cartridges.DefaultPollInterval,
+		log.With(slog.String("component", "catalog_watcher")),
+	)
+
+	// Cartridge → PG mirror sync loops. Cluster-wide singletons via
+	// pg_try_advisory_lock so every backplane replica can tick safely.
+	policiesRepo := inv_policies.NewBunRepository(db)
+	pipelinesRepo := inv_pipelines.NewBunRepository(db)
+	assessmentRunsRepo := policy_assessment_runs.NewBunRepository(db)
+	findingsRepo := findings.NewBunRepository(db)
+
+	policiesSync := core_policies.New(core_policies.Deps{
+		Provider: cartridgesProvider,
+		Repo:     policiesRepo,
+		Log:      log.With(slog.String("component", "policies-sync")),
+	})
+	go func() {
+		if err := policiesSync.RunSyncLoop(ctx, db, core_policies.DefaultSyncInterval); err != nil {
+			log.Error("policies sync loop terminated", slog.Any("err", err))
+		}
+	}()
+
+	pipelinesSync := core_pipelines.New(core_pipelines.Deps{
+		Provider: cartridgesProvider,
+		Loader:   pipelineLoader,
+		Repo:     pipelinesRepo,
+		Log:      log.With(slog.String("component", "pipelines-sync")),
+	})
+	go func() {
+		if err := pipelinesSync.RunSyncLoop(ctx, db, core_pipelines.DefaultSyncInterval); err != nil {
+			log.Error("pipelines sync loop terminated", slog.Any("err", err))
+		}
+	}()
+
 	apiV0 := e.Group("/api/v0")
 	cartridges.RegisterRoutes(apiV0, cartridgesProvider)
+	descriptor.RegisterRoutes(apiV0, cartridgesProvider)
 	orchestrator.RegisterDefinitionRoutes(apiV0, catalog, actionReg)
 	orchestrator.RegisterRunRoutes(apiV0, db, orchSvc, catalog)
 	orchestrator.RegisterWorkerRoutes(apiV0, db, orchSvc)
+	inv_policies.RegisterRoutes(apiV0, policiesRepo)
+	inv_pipelines.RegisterRoutes(apiV0, pipelinesRepo)
+	policy_assessment_runs.RegisterRoutes(apiV0, assessmentRunsRepo)
+	findings.RegisterRoutes(apiV0, findingsRepo)
 	orchestrator.RegisterWellKnownRoutes(e, actionReg)
 	applications.RegisterRoutes(apiV0, appsSvc, matchingAdapter{svc: connSvc})
 	connectors.RegisterRoutes(apiV0, connSvc)
@@ -491,6 +576,17 @@ func run(log *slog.Logger) error {
 	principals.RegisterRoutes(apiV0, principalsSvc)
 	inventory_ingest.RegisterRoutes(apiV0, ingestSvc)
 	inventory_discover.RegisterRoutes(apiV0, discoverSvc)
+
+	importSvc, err := inventory_import.NewService(inventory_import.Deps{
+		Ingest:  ingestSvc,
+		Actions: actionReg,
+		DB:      db,
+		Log:     log,
+	})
+	if err != nil {
+		return fmt.Errorf("inventory_import: %w", err)
+	}
+	inventory_import.RegisterRoutes(apiV0, importSvc)
 
 	serveErr := make(chan error, 1)
 	go func() {

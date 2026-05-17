@@ -35,12 +35,24 @@ type PipelineFileItem struct {
 	Path string `json:"path"`
 }
 
+// AppListItem is one entry in GET /cartridges/{id}/apps.
+type AppListItem struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Version     string `json:"version,omitempty"`
+	Connector   string `json:"connector"`
+	StatesCount int    `json:"states_count"`
+	FieldsCount int    `json:"fields_count"`
+}
+
 // RegisterRoutes mounts the cartridges read-only HTTP surface on g.
 func RegisterRoutes(g *echo.Group, provider Provider) {
 	g.GET("/cartridges", listHandler(provider))
 	g.GET("/cartridges/:id", detailHandler(provider))
 	g.GET("/cartridges/:id/policies", listPoliciesHandler(provider))
 	g.GET("/cartridges/:id/pipelines", listPipelinesHandler(provider))
+	g.GET("/cartridges/:id/apps", listAppsHandler(provider))
+	g.GET("/cartridges/:id/apps/:app_id", appDetailHandler(provider))
 }
 
 func listHandler(p Provider) echo.HandlerFunc {
@@ -122,6 +134,50 @@ func listPipelinesHandler(p Provider) echo.HandlerFunc {
 			})
 		}
 		return c.JSON(http.StatusOK, out)
+	}
+}
+
+func listAppsHandler(p Provider) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		ref := Ref{ID: c.Param("id")}
+		apps, err := p.Apps(ref)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return c.JSON(http.StatusNotFound, errorBody(err))
+			}
+			return c.JSON(http.StatusInternalServerError, errorBody(err))
+		}
+		out := make([]AppListItem, 0, len(apps))
+		for _, a := range apps {
+			out = append(out, AppListItem{
+				ID:          a.Manifest.ID,
+				Name:        a.Manifest.Name,
+				Version:     a.Manifest.Version,
+				Connector:   a.Manifest.Connector,
+				StatesCount: len(a.Account.States),
+				FieldsCount: len(a.Descriptor.Fields),
+			})
+		}
+		return c.JSON(http.StatusOK, out)
+	}
+}
+
+func appDetailHandler(p Provider) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		ref := Ref{ID: c.Param("id")}
+		appID := c.Param("app_id")
+		apps, err := p.Apps(ref)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return c.JSON(http.StatusNotFound, errorBody(err))
+			}
+			return c.JSON(http.StatusInternalServerError, errorBody(err))
+		}
+		app, ok := apps[appID]
+		if !ok {
+			return c.JSON(http.StatusNotFound, errorBody(errors.New("app cartridge not found")))
+		}
+		return c.JSON(http.StatusOK, app)
 	}
 }
 

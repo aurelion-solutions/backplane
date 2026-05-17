@@ -9,7 +9,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/aurelion-solutions/backplane/internal/core/secret"
+	"github.com/aurelion-solutions/backplane/internal/platform/secretmanagers"
 )
 
 // Load constructs a Settings snapshot by reading JSON secrets from sm.
@@ -18,7 +18,7 @@ import (
 //
 // A missing required key is a fatal startup error. A missing optional
 // key silently falls back to the section's defaults.
-func Load(sm secret.Manager) (*Settings, error) {
+func Load(sm secretmanagers.Manager) (*Settings, error) {
 	pg, err := loadPostgres(sm)
 	if err != nil {
 		return nil, err
@@ -45,7 +45,7 @@ func Load(sm secret.Manager) (*Settings, error) {
 
 // decodeRequired reads sm[key] and JSON-decodes it into out. A missing
 // key is a fatal error.
-func decodeRequired(sm secret.Manager, key string, out any) error {
+func decodeRequired(sm secretmanagers.Manager, key string, out any) error {
 	raw, err := sm.Get(key)
 	if err != nil {
 		return fmt.Errorf("config: required secret %q: %w", key, err)
@@ -58,10 +58,10 @@ func decodeRequired(sm secret.Manager, key string, out any) error {
 
 // decodeOptional reads sm[key] and JSON-decodes it into out. A missing
 // key is silently ignored — out keeps the defaults the caller passed in.
-func decodeOptional(sm secret.Manager, key string, out any) error {
+func decodeOptional(sm secretmanagers.Manager, key string, out any) error {
 	raw, err := sm.Get(key)
 	if err != nil {
-		if errors.Is(err, secret.ErrNotFound) {
+		if errors.Is(err, secretmanagers.ErrNotFound) {
 			return nil
 		}
 		return fmt.Errorf("config: optional secret %q: %w", key, err)

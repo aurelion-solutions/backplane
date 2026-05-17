@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aurelion-solutions/backplane/internal/core/events"
 	"github.com/aurelion-solutions/backplane/internal/core/orchestrator"
 	"github.com/aurelion-solutions/backplane/internal/core/orchestrator/loader"
 	"github.com/aurelion-solutions/backplane/internal/core/orchestrator/registry"
@@ -63,20 +64,24 @@ type Runner struct {
 	reg      *registry.Registry
 	catalog  PipelineGetter
 	log      *slog.Logger
+	events   events.Sink
 	worker   WorkerIdentity
 }
 
 // New composes a Runner with all dependencies. The catalog reference
 // is shared with the backplane HTTP process — it never mutates here.
+// eventsSink is plumbed through into ActionContext.Events; pass nil only
+// in tests that drive a handler directly.
 func New(
 	db *bun.DB,
 	svc *orchestrator.Service,
 	reg *registry.Registry,
 	catalog PipelineGetter,
 	log *slog.Logger,
+	eventsSink events.Sink,
 	worker WorkerIdentity,
 ) *Runner {
-	return &Runner{db: db, svc: svc, reg: reg, catalog: catalog, log: log, worker: worker}
+	return &Runner{db: db, svc: svc, reg: reg, catalog: catalog, log: log, events: eventsSink, worker: worker}
 }
 
 // WorkLoop runs until ctx is cancelled. On shutdown the in-flight run
@@ -339,6 +344,7 @@ func (r *Runner) runStep(
 			Ctx:           ctx,
 			Tx:            tx,
 			Log:           r.log,
+			Events:        r.events,
 			PipelineRunID: runID,
 			StepRunID:     step.ID,
 			Attempt:       step.Attempt,

@@ -8,20 +8,21 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"sync"
 
 	"github.com/aurelion-solutions/backplane/internal/core/cartridges"
 	"github.com/aurelion-solutions/backplane/internal/core/orchestrator/loader"
 )
 
-// Catalog is the immutable in-memory snapshot of every pipeline
-// definition discovered at startup, keyed by name.
+// Catalog is the in-memory snapshot of every pipeline definition
+// discovered, keyed by name. Reads (Get / All / Sources) are
+// goroutine-safe; Reload swaps state under a write lock.
 //
-// Backplane is a single binary that boots once: the catalog is built
-// during composition and never mutated thereafter. Hot reload — when
-// it lands — will swap a fresh Catalog in atomically through a
-// future Reload() entry point; consumers SHOULD already treat the
-// pointer as immutable.
+// Worker (and any other consumer that holds a *Catalog) sees a fresh
+// snapshot the next time it calls Get / All — no need for a pointer
+// swap at the consumer level.
 type Catalog struct {
+	mu      sync.RWMutex
 	defs    map[string]*loader.Definition
 	sources []string // cartridge ids in the order they were scanned
 }
@@ -33,11 +34,15 @@ func NewCatalog() *Catalog {
 
 // Get returns the definition for name, or nil when absent.
 func (c *Catalog) Get(name string) *loader.Definition {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.defs[name]
 }
 
 // All returns every definition sorted by name.
 func (c *Catalog) All() []*loader.Definition {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	names := make([]string, 0, len(c.defs))
 	for n := range c.defs {
 		names = append(names, n)
@@ -52,9 +57,29 @@ func (c *Catalog) All() []*loader.Definition {
 
 // Sources returns the cartridge ids the catalog was built from.
 func (c *Catalog) Sources() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	out := make([]string, len(c.sources))
 	copy(out, c.sources)
 	return out
+}
+
+// Reload re-scans every cartridge through the supplied provider and
+// swaps the catalog's contents in place. Returns without mutation if
+// the scan fails — the previous catalogue stays in effect.
+//
+// Pass an empty cartridgeIDs to re-scan everything the provider
+// knows; same default as LoadFromCartridges.
+func (c *Catalog) Reload(p cartridges.Provider, l *loader.Loader, cartridgeIDs []string) error {
+	fresh, err := LoadFromCartridges(p, l, cartridgeIDs)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.defs = fresh.defs
+	c.sources = fresh.sources
+	c.mu.Unlock()
+	return nil
 }
 
 // LoadFromCartridges scans every cartridge id in cartridgeIDs through

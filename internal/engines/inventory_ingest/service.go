@@ -164,8 +164,10 @@ func (s *Service) Process(ctx context.Context, req Request) (*Result, error) {
 	if err := s.repo.Insert(ctx, batch); err != nil {
 		return nil, fmt.Errorf("inventory_ingest: insert batch audit: %w", err)
 	}
-	if err := s.emitReceived(ctx, batch); err != nil {
-		return nil, err
+	if !req.SkipEvent {
+		if err := s.emitReceived(ctx, batch); err != nil {
+			return nil, err
+		}
 	}
 
 	return &Result{

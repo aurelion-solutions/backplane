@@ -22,7 +22,7 @@ import (
 //	    policies/
 //	      bucket/
 //	        rule_one.meta.json
-//	        rule_one.rego          (ignored — provider only reads .meta.json)
+//	        rule_one.cedar         (sibling — handler-loaded, not by provider)
 //	        rule_two.meta.json
 //	  beta/
 //	    policies/
@@ -56,13 +56,13 @@ func buildFixture(t *testing.T) string {
 	mustWrite("alpha/pipelines/.gitkeep", "")
 
 	mustWrite("alpha/policies/bucket/rule_one.meta.json",
-		`{"rule_id":"alpha.one","version":1,"name":"One","mechanism":"generic"}`)
-	mustWrite("alpha/policies/bucket/rule_one.rego", "package alpha.one\n")
+		`{"rule_id":"alpha.one","version":1,"name":"One","mechanism":"cedar"}`)
+	mustWrite("alpha/policies/bucket/rule_one.cedar", "permit (principal, action, resource);\n")
 	mustWrite("alpha/policies/bucket/rule_two.meta.json",
-		`{"rule_id":"alpha.two","version":1,"name":"Two","mechanism":"generic"}`)
+		`{"rule_id":"alpha.two","version":1,"name":"Two","mechanism":"sod"}`)
 
 	mustWrite("beta/policies/flat.meta.json",
-		`{"rule_id":"beta.flat","version":1,"name":"Flat","mechanism":"generic"}`)
+		`{"rule_id":"beta.flat","version":1,"name":"Flat","mechanism":"risk_scoring"}`)
 
 	mustMkdir("empty")
 	mustMkdir(".hidden")
@@ -117,8 +117,11 @@ func TestFilesystemProvider_Policies(t *testing.T) {
 	if _, ok := got["alpha.one"]; !ok {
 		t.Fatalf("missing rule alpha.one in %v", got)
 	}
-	if got["alpha.one"].Mechanism != "generic" {
-		t.Fatalf("alpha.one.mechanism = %q, want generic", got["alpha.one"].Mechanism)
+	if got["alpha.one"].Mechanism != "cedar" {
+		t.Fatalf("alpha.one.mechanism = %q, want cedar", got["alpha.one"].Mechanism)
+	}
+	if got["alpha.one"].BasePath == "" {
+		t.Fatalf("alpha.one.BasePath empty, want absolute path to .meta.json")
 	}
 }
 

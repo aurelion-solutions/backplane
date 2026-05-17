@@ -4,7 +4,7 @@
 
 package config
 
-import "github.com/aurelion-solutions/backplane/internal/core/secret"
+import "github.com/aurelion-solutions/backplane/internal/platform/secretmanagers"
 
 // App is for bootstrap-only app concerns that must exist before any
 // HTTP handler runs (CORS, debug flag). Anything runtime-tunable
@@ -22,7 +22,7 @@ func DefaultApp() App {
 	}
 }
 
-func loadApp(sm secret.Manager) (App, error) {
+func loadApp(sm secretmanagers.Manager) (App, error) {
 	a := DefaultApp()
 	if err := decodeOptional(sm, "app", &a); err != nil {
 		return App{}, err

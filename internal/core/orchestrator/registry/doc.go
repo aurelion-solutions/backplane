@@ -18,6 +18,7 @@
 // schemas are accepted.
 //
 // Layering: registry imports core deps only. Action handlers shipped
-// alongside engines (e.g. internal/actions/noop) live in their own
-// packages and call Register at composition time.
+// alongside engines, plus the orchestrator-owned primitives in
+// internal/core/orchestrator/actions/noop, live in their own packages
+// and call Register at composition time.
 package registry

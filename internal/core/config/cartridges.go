@@ -7,7 +7,7 @@ package config
 import (
 	"os"
 
-	"github.com/aurelion-solutions/backplane/internal/core/secret"
+	"github.com/aurelion-solutions/backplane/internal/platform/secretmanagers"
 )
 
 // Cartridges is the bootstrap section for the cartridges-on-disk root.
@@ -31,7 +31,7 @@ func DefaultCartridges() Cartridges {
 	}
 }
 
-func loadCartridges(sm secret.Manager) (Cartridges, error) {
+func loadCartridges(sm secretmanagers.Manager) (Cartridges, error) {
 	c := DefaultCartridges()
 	if err := decodeOptional(sm, "cartridges", &c); err != nil {
 		return Cartridges{}, err

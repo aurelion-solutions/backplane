@@ -57,4 +57,12 @@ type Provider interface {
 	// The returned paths are absolute on disk. Returns an empty slice
 	// when the cartridge has no pipelines/ directory.
 	Pipelines(ref Ref) ([]string, error)
+
+	// Apps returns app_id → cartridge for every directory under the
+	// bundle's apps/ tree. Each AppCartridge has its three YAML files
+	// (manifest, account, descriptor) loaded and validated.
+	//
+	// Returns ErrNotFound if ref.ID is unknown. Returns an empty map
+	// when the bundle has no apps/ directory.
+	Apps(ref Ref) (map[string]AppCartridge, error)
 }

@@ -4,12 +4,10 @@
 
 package secretmanagers
 
-import "github.com/aurelion-solutions/backplane/internal/core/secret"
-
 // Akeyless is a placeholder for an Akeyless provider.
 type Akeyless struct{ Stub }
 
 // RegisterAkeyless wires the "akeyless" stub provider.
 func RegisterAkeyless(f *Factory) {
-	f.Register("akeyless", func() (secret.FullManager, error) { return Akeyless{}, nil })
+	f.Register("akeyless", func() (FullManager, error) { return Akeyless{}, nil })
 }

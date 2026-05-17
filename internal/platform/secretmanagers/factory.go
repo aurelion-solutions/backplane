@@ -8,17 +8,14 @@ import (
 	"fmt"
 	"sort"
 	"sync"
-
-	"github.com/aurelion-solutions/backplane/internal/core/secret"
 )
 
-// Constructor builds a secret.FullManager. Provider registrations supply one.
-type Constructor func() (secret.FullManager, error)
+// Constructor builds a FullManager. Provider registrations supply one.
+type Constructor func() (FullManager, error)
 
-// Factory is a registry of named secret.FullManager constructors.
-// Mirrors kernel's SecretManagerFactory: providers register at
-// composition time, the runtime resolves one provider by name from
-// settings.
+// Factory is a registry of named FullManager constructors. Providers
+// register at composition time; the runtime resolves one provider by
+// name from settings.
 //
 // Safe for concurrent use.
 type Factory struct {
@@ -39,9 +36,8 @@ func (f *Factory) Register(name string, ctor Constructor) {
 }
 
 // Get constructs a fresh FullManager for the named provider. Callers
-// may narrow the returned value to secret.Manager or secret.Mutator at
-// the call site.
-func (f *Factory) Get(name string) (secret.FullManager, error) {
+// may narrow the returned value to Manager or Mutator at the call site.
+func (f *Factory) Get(name string) (FullManager, error) {
 	f.mu.RLock()
 	ctor, ok := f.ctors[name]
 	f.mu.RUnlock()

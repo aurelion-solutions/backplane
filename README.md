@@ -49,8 +49,8 @@ internal/
 
 ```
 cmd            → everything (composition root)
-core/config    → core/secret
-core/*         → nothing inside backplane
+core/config    → platform/secretmanagers (Manager interface)
+core/*         → nothing inside backplane (except config → secretmanagers)
 integrations/* → core/*, platform/* (via DI from main)
 platform/*     → core/* (adapters reference the port they implement)
 engines/*      → core/*, platform/*, integrations/* (when wired)
@@ -81,7 +81,7 @@ directly — `main.go` wires a small adapter that satisfies the
 
 1. `cmd/backplane/main.go` calls `godotenv.Load()` (best-effort).
 2. Reads `AURELION_SECRET_PROVIDER` from env.
-3. Constructs a `secret.Manager` via `secret.Factory.Get(provider)`.
+3. Constructs a `secretmanagers.Manager` via `secretmanagers.Factory.Get(provider)`.
 4. `config.Load(manager)` returns an immutable `*config.Settings`.
 5. `logger.New`, `postgres.New`, `rabbitmq.New`, `logsink` providers
    and `webserver.New` are wired in order. Each fails fast on

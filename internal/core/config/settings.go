@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 // Package config defines the immutable bootstrap Settings tree and the
-// Loader that materialises it from a secret.Manager.
+// Loader that materialises it from a secretmanagers.Manager.
 //
 // Layout convention: one file per section.
 //

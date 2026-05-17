@@ -26,11 +26,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aurelion-solutions/backplane/internal/actions/noop"
 	"github.com/aurelion-solutions/backplane/internal/core/cartridges"
 	"github.com/aurelion-solutions/backplane/internal/core/config"
+	"github.com/aurelion-solutions/backplane/internal/core/events"
 	"github.com/aurelion-solutions/backplane/internal/core/logger"
 	"github.com/aurelion-solutions/backplane/internal/core/orchestrator"
+	"github.com/aurelion-solutions/backplane/internal/core/orchestrator/actions/noop"
 	"github.com/aurelion-solutions/backplane/internal/core/orchestrator/loader"
 	"github.com/aurelion-solutions/backplane/internal/core/orchestrator/registry"
 	"github.com/aurelion-solutions/backplane/internal/core/orchestrator/runner"
@@ -40,13 +41,20 @@ import (
 	normalize_account "github.com/aurelion-solutions/backplane/internal/engines/inventory_normalize/actions/account"
 	normalize_employee "github.com/aurelion-solutions/backplane/internal/engines/inventory_normalize/actions/employee"
 	normalize_orgunit "github.com/aurelion-solutions/backplane/internal/engines/inventory_normalize/actions/orgunit"
+	"github.com/aurelion-solutions/backplane/internal/engines/policy_assessment"
+	"github.com/aurelion-solutions/backplane/internal/engines/policy_assessment/actions/assess"
+	cedarmech "github.com/aurelion-solutions/backplane/internal/engines/policy_assessment/mechanisms/cedar"
+	opamech "github.com/aurelion-solutions/backplane/internal/engines/policy_assessment/mechanisms/opa"
+	sodmech "github.com/aurelion-solutions/backplane/internal/engines/policy_assessment/mechanisms/sod"
 	"github.com/aurelion-solutions/backplane/internal/inventory/accounts"
 	"github.com/aurelion-solutions/backplane/internal/inventory/capability_grants"
 	"github.com/aurelion-solutions/backplane/internal/inventory/capability_mappings"
 	"github.com/aurelion-solutions/backplane/internal/inventory/employee_provider_mappings"
 	"github.com/aurelion-solutions/backplane/internal/inventory/employment_record_matches"
+	"github.com/aurelion-solutions/backplane/internal/inventory/findings"
 	"github.com/aurelion-solutions/backplane/internal/inventory/org_units"
 	"github.com/aurelion-solutions/backplane/internal/inventory/persons"
+	"github.com/aurelion-solutions/backplane/internal/inventory/policy_assessment_runs"
 	"github.com/aurelion-solutions/backplane/internal/platform/secretmanagers"
 	"github.com/aurelion-solutions/backplane/internal/platform/siem"
 	"github.com/aurelion-solutions/backplane/internal/platform/storage"
@@ -113,6 +121,7 @@ func run(log *slog.Logger) error {
 		URL: settings.RabbitMQ.URL(),
 		Exchanges: []rabbitmq.Exchange{
 			{Name: settings.RabbitMQ.LogsExchange, Type: rabbitmq.Topic},
+			{Name: settings.RabbitMQ.EventsExchange, Type: rabbitmq.Topic},
 		},
 	})
 	if err != nil {
@@ -124,6 +133,9 @@ func run(log *slog.Logger) error {
 	bootSink := siem.NewMQSink(mq.Channel, settings.RabbitMQ.LogsExchange)
 	siem.EmitInfo(ctx, bootSink, "worker", "worker started")
 	defer siem.EmitInfo(context.Background(), bootSink, "worker", "worker stopping")
+
+	eventsSink := events.NewMQ(mq.Channel, settings.RabbitMQ.EventsExchange)
+	log.Info("events sink ready")
 
 	// Cartridges + pipeline catalog.
 	cf := cartridges.NewFactory()
@@ -171,6 +183,40 @@ func run(log *slog.Logger) error {
 		Matches:  employment_record_matches.NewBunRepository(),
 	})
 	normalize_orgunit.Register(reg, normalize_orgunit.Deps{Lake: st})
+
+	// policy_assessment engine: store of cartridge-loaded policies +
+	// dispatcher with the mechanism handlers this worker supports.
+	policyStore := policy_assessment.NewStore()
+	if n, err := policyStore.Reload(ctx, provider); err != nil {
+		return fmt.Errorf("policy_assessment: store reload: %w", err)
+	} else {
+		log.Info("policy store loaded", slog.Int("entries", n))
+	}
+	policyDispatcher := policy_assessment.NewDispatcher()
+	policyDispatcher.Register(opamech.New())
+	policyDispatcher.Register(cedarmech.New())
+	policyDispatcher.Register(sodmech.New())
+	if ok, errs := policyDispatcher.PrepareAll(ctx, policyStore.All()); len(errs) > 0 {
+		for _, e := range errs {
+			log.Warn("policy prepare failed", slog.Any("err", e))
+		}
+		log.Info("policy prepare done", slog.Int("ok", ok), slog.Int("errors", len(errs)))
+	} else {
+		log.Info("policy prepare done", slog.Int("ok", ok))
+	}
+
+	// policy_assessment.assess action — pipeline-runnable unit that
+	// evaluates the active policy catalogue against the inventory
+	// snapshot and persists findings.
+	assess.Register(reg, assess.Deps{
+		DB:           db,
+		AccountsRepo: accounts.NewBunRepository(),
+		RunsRepo:     policy_assessment_runs.NewBunRepository(db),
+		FindingsRepo: findings.NewBunRepository(db),
+		Store:        policyStore,
+		Dispatcher:   policyDispatcher,
+	})
+
 	log.Info("action registry ready", slog.Int("actions", len(reg.All())))
 
 	pipelineLoader := &loader.Loader{Actions: nil} // see backplane main for rationale
@@ -193,9 +239,28 @@ func run(log *slog.Logger) error {
 	)
 
 	var wg sync.WaitGroup
+
+	// Cartridge mtime watcher — rebuilds the pipeline catalog when
+	// any cartridge YAML changes on disk. 5 s polling, same baseline
+	// as the backplane sync loop.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		orchestrator.RunCatalogWatcher(
+			ctx,
+			catalog,
+			provider,
+			pipelineLoader,
+			nil,
+			settings.Cartridges.Root,
+			cartridges.DefaultPollInterval,
+			log.With(slog.String("component", "catalog_watcher")),
+		)
+	}()
+
 	for i := 0; i < slots; i++ {
 		wid := runner.NewWorkerIdentity(i, tags)
-		r := runner.New(db, svc, reg, catalog, log.With(slog.Int("slot", i)), wid)
+		r := runner.New(db, svc, reg, catalog, log.With(slog.Int("slot", i)), eventsSink, wid)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

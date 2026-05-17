@@ -2,9 +2,6 @@
 //
 // SPDX-License-Identifier: BUSL-1.1
 
-// Package secretmanagers holds concrete secret.FullManager implementations.
-// One file per backend (file, vault, akeyless, conjur, openbao, …). Each
-// provider exposes a Register* helper that wires itself into secret.Factory.
 package secretmanagers
 
 import (
@@ -15,8 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-
-	"github.com/aurelion-solutions/backplane/internal/core/secret"
 )
 
 // File is a development-only secret store backed by a local JSON file.
@@ -43,7 +38,7 @@ func NewFile(path string) *File {
 	return &File{path: path}
 }
 
-// Get implements secret.Manager.
+// Get implements Manager.
 func (p *File) Get(key string) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -53,12 +48,12 @@ func (p *File) Get(key string) (string, error) {
 	}
 	raw, ok := data[key]
 	if !ok {
-		return "", fmt.Errorf("%w: %q (file=%s)", secret.ErrNotFound, key, p.path)
+		return "", fmt.Errorf("%w: %q (file=%s)", ErrNotFound, key, p.path)
 	}
 	return encodeValue(raw)
 }
 
-// Set implements secret.Mutator.
+// Set implements Mutator.
 func (p *File) Set(key, value string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -70,7 +65,7 @@ func (p *File) Set(key, value string) error {
 	return p.save(data)
 }
 
-// Delete implements secret.Mutator.
+// Delete implements Mutator.
 func (p *File) Delete(key string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -79,7 +74,7 @@ func (p *File) Delete(key string) error {
 		return err
 	}
 	if _, ok := data[key]; !ok {
-		return fmt.Errorf("%w: %q (file=%s)", secret.ErrNotFound, key, p.path)
+		return fmt.Errorf("%w: %q (file=%s)", ErrNotFound, key, p.path)
 	}
 	delete(data, key)
 	return p.save(data)
@@ -123,8 +118,8 @@ func (p *File) save(data map[string]any) error {
 }
 
 // encodeValue normalises a raw JSON value into the string shape the
-// secret.Manager API hands back. Strings pass through; everything else
-// is re-encoded to JSON so callers can json.Unmarshal it as before.
+// Manager API hands back. Strings pass through; everything else is
+// re-encoded to JSON so callers can json.Unmarshal it as before.
 func encodeValue(v any) (string, error) {
 	if s, ok := v.(string); ok {
 		return s, nil
@@ -138,7 +133,7 @@ func encodeValue(v any) (string, error) {
 
 // RegisterFile wires the "file" provider into f.
 func RegisterFile(f *Factory, path string) {
-	f.Register("file", func() (secret.FullManager, error) {
+	f.Register("file", func() (FullManager, error) {
 		return NewFile(path), nil
 	})
 }

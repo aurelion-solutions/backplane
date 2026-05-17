@@ -158,16 +158,14 @@ become useful.)
 - modify `Employment` after creation (a fresh `code` / `start_date`
   in payload is currently ignored; an applier will land when needed)
 
-## Source of truth
+## Entity mapping
 
-The algorithm is a 1:1 port from the Fortevera project
-(`backend/src/app/org/services/employee_resolver.py`) and the
-kernel's `EmployeeResolverService`. Adaptation:
+The action operates on three entities, with attribute storage
+deliberately split between the lake and PG:
 
-- `Composite` → `Person` (plus an upstream-FK layer)
-- `Candidate` → `EmployeeRecord` in the lake (not Postgres)
-- `CompositeCandidate` (match) + Fortevera's separate `LaborPhase`
-  events → one entity here: `employment_record_matches`, while the
-  existing `Employment.code` carries the labor state as free text
-- Person-side attributes — EAV in `person_attributes`, identical to
-  Fortevera
+- `Person` — the canonical identity row in PG. One per real human.
+- `EmployeeRecord` — the per-provider raw row, kept in the lake.
+- `employment_record_matches` — links a record to the Person it
+  matched, while `Employment.code` carries the current labor state
+  as a free-form string.
+- Person attributes live in `person_attributes` as EAV.

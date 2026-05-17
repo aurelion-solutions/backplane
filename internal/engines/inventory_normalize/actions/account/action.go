@@ -109,5 +109,31 @@ func buildAccount(rec map[string]any, source string, now time.Time) (*accounts.A
 	if a, ok := payload["attrs"].(map[string]any); ok {
 		acc.Attrs = a
 	}
+	acc.EffectiveState = deriveEffectiveState(acc)
 	return acc, true
+}
+
+// deriveEffectiveState maps the connector-supplied is_active /
+// status into the canonical state vocabulary. Order:
+//
+//  1. If `status` is one of the canonical values, use it verbatim —
+//     the connector knows the difference between "invited" and
+//     "active" that the boolean is_active can't carry.
+//  2. Otherwise fall back to is_active: true → active, false →
+//     blocked (an existing-but-disabled account is "blocked", not
+//     "not_exist").
+//
+// `not_exist` is never written by this path — discovery only sees
+// accounts the connector reports, which means they exist.
+func deriveEffectiveState(a *accounts.Account) string {
+	if a.Status != nil {
+		switch *a.Status {
+		case accounts.StateActive, accounts.StateBlocked, accounts.StateInvited, accounts.StatePending:
+			return *a.Status
+		}
+	}
+	if a.IsActive {
+		return accounts.StateActive
+	}
+	return accounts.StateBlocked
 }

@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/aurelion-solutions/backplane/internal/actions/noop"
 	"github.com/aurelion-solutions/backplane/internal/core/cartridges"
+	"github.com/aurelion-solutions/backplane/internal/core/orchestrator/actions/noop"
 	"github.com/aurelion-solutions/backplane/internal/core/orchestrator/loader"
 	"github.com/aurelion-solutions/backplane/internal/core/orchestrator/registry"
 )
@@ -127,15 +127,36 @@ func TestBuildActionCatalogue_Sorted(t *testing.T) {
 	reg := registry.New()
 	noop.Register(reg)
 	cat := BuildActionCatalogue(reg)
-	if len(cat) != 2 {
-		t.Fatalf("len = %d, want 2", len(cat))
+	wantActions := []string{"constant", "echo", "emit", "fail", "sleep"}
+	if len(cat) != len(wantActions) {
+		t.Fatalf("len = %d, want %d", len(cat), len(wantActions))
 	}
-	if cat[0].Action != "echo" || cat[1].Action != "sleep" {
-		t.Fatalf("catalogue order = [%s, %s]", cat[0].Action, cat[1].Action)
+	for i, want := range wantActions {
+		if cat[i].Action != want {
+			t.Fatalf("catalogue[%d] = %s, want %s (full order: %v)",
+				i, cat[i].Action, want, actionNames(cat))
+		}
 	}
-	if !cat[0].Idempotent || !cat[1].Idempotent {
-		t.Fatalf("idempotent flag lost")
+	idempotency := map[string]bool{
+		"constant": true,
+		"echo":     true,
+		"emit":     false,
+		"fail":     true,
+		"sleep":    true,
 	}
+	for _, entry := range cat {
+		if entry.Idempotent != idempotency[entry.Action] {
+			t.Fatalf("%s idempotent = %v, want %v", entry.Action, entry.Idempotent, idempotency[entry.Action])
+		}
+	}
+}
+
+func actionNames(cat []ActionDescriptor) []string {
+	out := make([]string, len(cat))
+	for i, e := range cat {
+		out[i] = e.Action
+	}
+	return out
 }
 
 func equal(a, b []string) bool {

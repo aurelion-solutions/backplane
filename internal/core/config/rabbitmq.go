@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"net/url"
 
-	"github.com/aurelion-solutions/backplane/internal/core/secret"
+	"github.com/aurelion-solutions/backplane/internal/platform/secretmanagers"
 )
 
 // RabbitMQ holds AMQP connection parameters and exchange names.
@@ -54,7 +54,7 @@ func (r RabbitMQ) URL() string {
 	return u.String()
 }
 
-func loadRabbitMQ(sm secret.Manager) (RabbitMQ, error) {
+func loadRabbitMQ(sm secretmanagers.Manager) (RabbitMQ, error) {
 	r := DefaultRabbitMQ()
 	if err := decodeRequired(sm, "rabbitmq", &r); err != nil {
 		return RabbitMQ{}, err

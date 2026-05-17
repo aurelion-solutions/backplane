@@ -36,3 +36,35 @@ One record per provider user-mailbox.
   JSONB for the rest.
 
 Normalized by [`inventory_normalize.account`](../../engines/inventory_normalize/actions/account/).
+
+## State columns
+
+Every row carries three independent state observations, each owned
+by exactly one writer:
+
+| Column | Value vocabulary | Writer |
+|---|---|---|
+| `effective_state` | `not_exist / pending / blocked / invited / active` | `inventory_normalize.account` (from connector data); `access_apply` (sets `pending` when a command is shipped, until ingest confirms) |
+| `desired_state`   | same | `policy_assessment.generative` |
+| `validated_state` | same | PDP validator (filters desired through deny grants, SoD, segregation rules) |
+
+`access_apply` reacts to `validated_state ≠ effective_state` — that's
+the working set it ships to connectors. The composite index
+`ix_accounts_state_divergence (application_id, validated_state,
+effective_state)` backs that scan.
+
+Each column has a single-writer setter on the repository:
+`SetDesiredState`, `SetValidatedState`, `SetEffectiveState`. `Upsert`
+writes `effective_state` on conflict (the connector tells us what
+*is*); it leaves `desired_state` and `validated_state` alone so the
+observers stay authoritative for their columns.
+
+`pending` means different things on each axis:
+
+- `desired_state = pending`   → generative has not assessed the row yet
+- `validated_state = pending` → PDP has not validated it yet
+- `effective_state = pending` → a command is in flight; ingest has not
+  confirmed the new actual state
+
+Canonical state constants live in `model.go` as `StateNotExist`,
+`StatePending`, `StateBlocked`, `StateInvited`, `StateActive`.

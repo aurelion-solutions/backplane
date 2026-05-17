@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"net/url"
 
-	"github.com/aurelion-solutions/backplane/internal/core/secret"
+	"github.com/aurelion-solutions/backplane/internal/platform/secretmanagers"
 )
 
 // Postgres holds connection parameters for the primary database.
@@ -45,7 +45,7 @@ func (p Postgres) DSN() string {
 	return u.String()
 }
 
-func loadPostgres(sm secret.Manager) (Postgres, error) {
+func loadPostgres(sm secretmanagers.Manager) (Postgres, error) {
 	p := DefaultPostgres()
 	if err := decodeRequired(sm, "postgres", &p); err != nil {
 		return Postgres{}, err
