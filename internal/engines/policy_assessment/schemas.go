@@ -6,6 +6,31 @@ package policy_assessment
 
 import "time"
 
+// SubjectFacts is the resolved owner-chain / lineage view of a subject.
+//
+// CONTRACT (F3): `input.subject` (this type) is the resolved lineage
+// view — it carries the terminus of the full ownership chain
+// (Ownership.Terminus). `input.principal.owner` (PrincipalFacts.Owner)
+// is the raw direct-owner reference — a single un-resolved owner ref
+// with no lineage. They are DISTINCT views, not duplicates.
+//
+// The ispm-workload-posture cartridge reads ONLY `input.subject` (never
+// `input.principal.owner`). Any future rule author MUST NOT confuse
+// these two representations.
+type SubjectFacts struct {
+	Kind      string          `json:"kind,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Ownership *OwnershipFacts `json:"ownership,omitempty"`
+}
+
+// OwnershipFacts carries the resolved lineage details for a subject.
+type OwnershipFacts struct {
+	Terminus            string     `json:"terminus,omitempty"`
+	OwnerPersonID       string     `json:"owner_person_id,omitempty"`
+	OwnerLabel          string     `json:"owner_label,omitempty"`
+	LastTerminationDate *time.Time `json:"last_termination_date,omitempty"`
+}
+
 // RuleResult is the unified wrapper for one policy evaluation.
 //
 // Either or both output variables may be populated, depending on the
@@ -141,6 +166,16 @@ type Facts struct {
 	// Mechanism handlers may read it but should treat it as
 	// untyped / best-effort.
 	Extra map[string]any `json:"extra,omitempty"`
+	// EvidencePresent records which truth-input keys the caller could
+	// supply evidence for (e.g. "mfa_evidence": true). The stack_check
+	// gate consults it to decide not_evaluable. A missing or false key
+	// means the evidence is absent. Set by the caller (assess action).
+	EvidencePresent map[string]bool `json:"evidence_present,omitempty"`
+	// Subject carries the resolved owner-chain / lineage view for workload
+	// evaluations. Nil in the account path (omitempty marshals it away;
+	// account-path OPA policies are unaffected). Populated only in the
+	// workload assessment pass via factsForWorkload.
+	Subject *SubjectFacts `json:"subject,omitempty"`
 }
 
 // PrincipalFacts is the principal snapshot. May be nil for
@@ -152,7 +187,7 @@ type PrincipalFacts struct {
 	OrgUnit             string         `json:"org_unit,omitempty"`
 	StartDate           *time.Time     `json:"start_date,omitempty"`
 	TermDate            *time.Time     `json:"term_date,omitempty"`
-	NHIKind             string         `json:"nhi_kind,omitempty"`
+	WorkloadKind        string         `json:"workload_kind,omitempty"`
 	Owner               *OwnerFacts    `json:"owner,omitempty"`
 	ExpiresAt           *time.Time     `json:"expires_at,omitempty"`
 	EmailVerified       *bool          `json:"email_verified,omitempty"`
@@ -166,7 +201,7 @@ type PrincipalFacts struct {
 	Attributes          map[string]any `json:"attributes,omitempty"`
 }
 
-// OwnerFacts is an NHI subject's owner reference.
+// OwnerFacts is a workload subject's owner reference.
 type OwnerFacts struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
@@ -183,6 +218,7 @@ type TargetFacts struct {
 	PrincipalID          string           `json:"principal_id,omitempty"`
 	AccountStatus        string           `json:"account_status,omitempty"`
 	AccountIsPrivileged  *bool            `json:"account_is_privileged,omitempty"`
+	AccountMFAEnabled    *bool            `json:"account_mfa_enabled,omitempty"`
 	LastLoginAt          *time.Time       `json:"last_login_at,omitempty"`
 	Initiatives          []InitiativeFact `json:"initiatives,omitempty"`
 	PrivilegeLevel       string           `json:"privilege_level,omitempty"`

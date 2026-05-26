@@ -12,7 +12,7 @@ result, err := engine.Recompute(ctx, principalID, RecomputeFilter{...})
 
 Every trigger reduces to this call:
 
-- Journey pipeline action on `employee.org_unit_changed` etc.
+- Orchestrator pipeline action on `employee.org_unit_changed` etc.
 - Beat-scheduled passes (daily reconcile, grace-period expiry checks)
 - Ad-hoc REST trigger ("review principal X")
 
@@ -98,6 +98,6 @@ nil so the engine works today on inheritance alone.
 - `effective_state` writes — `inventory_normalize` (from connector
   data) and the future `access_promote` (when it ships a command and
   parks effective at `pending`).
-- MQ subscription / dispatch — Journey-side pipelines translate
+- MQ subscription / dispatch — upstream pipelines translate
   domain events into `Recompute` calls; this engine never subscribes
   directly.

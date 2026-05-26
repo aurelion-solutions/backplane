@@ -643,12 +643,12 @@ func (s *Service) IsScheduleAlreadyFired(
 // ReclaimResult reports what ReclaimStaleRun did so the caller can
 // shape the heartbeat_lost event.
 type ReclaimResult struct {
-	OK                bool
-	PreviousWorkerID  *string
-	StaleForSeconds   float64
-	AbortedStepRunID  *uuid.UUID
-	AbortedStepName   string
-	AbortedAttempt    int
+	OK               bool
+	PreviousWorkerID *string
+	StaleForSeconds  float64
+	AbortedStepRunID *uuid.UUID
+	AbortedStepName  string
+	AbortedAttempt   int
 }
 
 // ListStaleRunIDs returns IDs of running rows whose

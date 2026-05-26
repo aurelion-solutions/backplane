@@ -12,9 +12,9 @@
 // is a JSONB discriminated union describing how to compute the scope
 // value at projection time:
 //
-//   { "kind": "constant",             "value": "<string>" }
-//   { "kind": "application_id" }
-//   { "kind": "principal_attribute",  "key":  "<attr key on Account>" }
-//   { "kind": "resource_external_id" } — straight from the grant record
-//   { "kind": "resource_attribute",   "key":  "<attr key on AccessArtifact>" }   (lake lookup; not implemented yet)
+//	{ "kind": "constant",             "value": "<string>" }
+//	{ "kind": "application_id" }
+//	{ "kind": "principal_attribute",  "key":  "<attr key on Account>" }
+//	{ "kind": "resource_external_id" } — straight from the grant record
+//	{ "kind": "resource_attribute",   "key":  "<attr key on AccessArtifact>" }   (lake lookup; not implemented yet)
 package capability_mappings

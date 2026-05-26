@@ -18,7 +18,7 @@
 //
 // What it does NOT do:
 //
-//   - match the account to a principal (employee / NHI / customer) —
+//   - match the account to a principal (employee / workload / customer) —
 //     that is a separate downstream engine,
 //   - infer fields the connector did not send,
 //   - reconcile across applications.

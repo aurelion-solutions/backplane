@@ -145,7 +145,7 @@ func (h *Handler) Evaluate(_ context.Context, req policy_assessment.Request) (po
 							"conditions_met": len(cache.conditions),
 						},
 						FactValues: map[string]any{
-							"principal.id":              req.Facts.Principal.ID,
+							"principal.id":               req.Facts.Principal.ID,
 							"principal.capability_slugs": req.Facts.Principal.CapabilitySlugs,
 						},
 						Produced: map[string]any{

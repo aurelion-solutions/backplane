@@ -58,9 +58,9 @@ type BodySources struct {
 //   - workload   → active when the workload row exists, expired when
 //     it has been removed
 //   - customer   → active when email_verified, registered otherwise.
-//                  suspended / banned / deletion_requested are not
-//                  reached via derivation; they are set explicitly by
-//                  the operations that put a customer there.
+//     suspended / banned / deletion_requested are not
+//     reached via derivation; they are set explicitly by
+//     the operations that put a customer there.
 //
 // Lock is intentionally NOT part of this function — it is a separate
 // axis stored directly on Principal.

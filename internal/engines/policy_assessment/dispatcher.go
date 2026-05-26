@@ -127,7 +127,16 @@ func (d *Dispatcher) Evaluate(ctx context.Context, req Request) (Output, error) 
 
 // EvaluateEntry is a convenience that builds a Request from an Entry
 // and the supplied Facts, then dispatches.
+//
+// stack_check gate: when the entry declares a stack_check precondition,
+// EvaluateEntry first checks every required truth-input key against
+// facts.EvidencePresent. If any is absent, it short-circuits to a
+// not_evaluable Output without running the mechanism — the rule cannot
+// be judged on incomplete evidence (the Blind Spots path).
 func (d *Dispatcher) EvaluateEntry(ctx context.Context, entry Entry, facts Facts) (Output, error) {
+	if missing := missingEvidence(entry, facts); len(missing) > 0 {
+		return Output{NotEvaluable: true, MissingEvidence: missing}, nil
+	}
 	return d.Evaluate(ctx, Request{
 		Mechanism:    entry.Manifest.Mechanism,
 		PolicyID:     entry.CartridgeRef + "/" + entry.Manifest.RuleID,
@@ -136,4 +145,20 @@ func (d *Dispatcher) EvaluateEntry(ctx context.Context, entry Entry, facts Facts
 		Body:         entry.Manifest.Body,
 		Facts:        facts,
 	})
+}
+
+// missingEvidence returns the stack_check required keys the facts do
+// not carry evidence for, in declaration order. Empty when there is no
+// stack_check or all required evidence is present.
+func missingEvidence(entry Entry, facts Facts) []string {
+	if entry.Manifest.StackCheck == nil {
+		return nil
+	}
+	var missing []string
+	for _, key := range entry.Manifest.StackCheck.Requires {
+		if !facts.EvidencePresent[key] {
+			missing = append(missing, key)
+		}
+	}
+	return missing
 }

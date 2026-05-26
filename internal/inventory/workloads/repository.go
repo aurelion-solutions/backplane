@@ -19,6 +19,7 @@ type Repository interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*Workload, error)
 	GetByExternalID(ctx context.Context, externalID string) (*Workload, error)
 	List(ctx context.Context, limit, offset int) ([]*Workload, int, error)
+	ListByApplication(ctx context.Context, appID uuid.UUID, limit, offset int) ([]*Workload, int, error)
 	Insert(ctx context.Context, w *Workload) error
 	Update(ctx context.Context, w *Workload) error
 
@@ -70,6 +71,24 @@ func (r *BunRepository) GetByExternalID(ctx context.Context, externalID string) 
 func (r *BunRepository) List(ctx context.Context, limit, offset int) ([]*Workload, int, error) {
 	out := []*Workload{}
 	q := r.db.NewSelect().Model(&out).Order("updated_at DESC", "id ASC")
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	if offset > 0 {
+		q = q.Offset(offset)
+	}
+	total, err := q.ScanAndCount(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	return out, total, nil
+}
+
+// ListByApplication returns a paginated slice + total of the workloads
+// bound to one application.
+func (r *BunRepository) ListByApplication(ctx context.Context, appID uuid.UUID, limit, offset int) ([]*Workload, int, error) {
+	out := []*Workload{}
+	q := r.db.NewSelect().Model(&out).Where("application_id = ?", appID).Order("updated_at DESC", "id ASC")
 	if limit > 0 {
 		q = q.Limit(limit)
 	}

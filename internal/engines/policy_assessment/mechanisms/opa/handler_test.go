@@ -257,6 +257,85 @@ func TestOPA_NoMatch(t *testing.T) {
 	}
 }
 
+// privilegedRobustRego mirrors the fixed ispm-core privileged_access:
+// it matches on account-level privilege but builds its decision object
+// using object.get for the optional Path-2 fields, so an account-level
+// match (no action / privilege_level in the envelope) still produces a
+// decision.
+const privilegedRobustRego = `package sample.privileged_robust
+
+import rego.v1
+
+default decision := null
+
+matched if { input.target.account_is_privileged == true }
+matched if { input.action == "administer"; input.target.privilege_level == "admin" }
+
+decision := {
+	"risk_level": "high",
+	"signals":    ["privileged_access"],
+	"reasons": [{
+		"rule_id":   "sample/privileged_robust",
+		"rule_kind": "access_risk",
+		"fact_values": {
+			"target.account_is_privileged": input.target.account_is_privileged,
+			"action":                       object.get(input, "action", ""),
+			"target.privilege_level":       object.get(input.target, "privilege_level", ""),
+		},
+	}],
+} if { matched }
+`
+
+// privilegedEagerRego is the pre-fix shape: it references input.action
+// directly while constructing the decision. On an account-level match
+// with no action present, that undefined reference undefines the whole
+// rule and the decision silently falls back to the null default.
+const privilegedEagerRego = `package sample.privileged_eager
+
+import rego.v1
+
+default decision := null
+
+matched if { input.target.account_is_privileged == true }
+
+decision := {
+	"risk_level": "high",
+	"signals":    ["privileged_access"],
+	"reasons": [{"fact_values": {"action": input.action}}],
+} if { matched }
+`
+
+// TestOPA_RobustDecisionFiresWithoutOptionalFields locks the
+// privileged_access fix: object.get keeps the decision defined when an
+// optional input field is absent, where a direct reference would not.
+func TestOPA_RobustDecisionFiresWithoutOptionalFields(t *testing.T) {
+	priv := true
+	facts := policy_assessment.Facts{
+		Target: &policy_assessment.TargetFacts{
+			Kind:                "account",
+			ID:                  "acc-1",
+			AccountIsPrivileged: &priv,
+			// No action / privilege_level — an account-level match.
+		},
+		Now: time.Now().UTC(),
+	}
+
+	robust := writePolicy(t, t.TempDir(), "privileged_robust", privilegedRobustRego)
+	out := evalEntry(t, New(), policy_assessment.Entry{CartridgeRef: "sample", Manifest: robust}, facts)
+	if !out.Matched || out.Result.Decision == nil {
+		t.Fatalf("robust policy should fire on account-level privilege; out=%+v", out)
+	}
+	if out.Result.Decision.RiskLevel != policy_assessment.RiskHigh {
+		t.Fatalf("expected risk_level=high; got %q", out.Result.Decision.RiskLevel)
+	}
+
+	eager := writePolicy(t, t.TempDir(), "privileged_eager", privilegedEagerRego)
+	outEager := evalEntry(t, New(), policy_assessment.Entry{CartridgeRef: "sample", Manifest: eager}, facts)
+	if outEager.Matched || outEager.Result.Decision != nil {
+		t.Fatalf("eager policy must NOT fire (undefined input.action undefines the rule); out=%+v", outEager)
+	}
+}
+
 // TestOPA_ExplicitPolicyFile honours Body.policy_file override.
 func TestOPA_ExplicitPolicyFile(t *testing.T) {
 	dir := t.TempDir()

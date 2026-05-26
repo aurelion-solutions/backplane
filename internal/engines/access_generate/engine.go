@@ -132,7 +132,7 @@ func New(d Deps) (*Engine, error) {
 	return &Engine{deps: d}, nil
 }
 
-// Recompute is the single entry point. Every trigger (Journey
+// Recompute is the single entry point. Every trigger (orchestrator
 // pipeline action, beat-scheduled pass, ad-hoc REST call) reduces to
 // `Recompute(ctx, principalID, filter)`.
 //

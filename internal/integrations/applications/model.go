@@ -30,6 +30,11 @@ type Application struct {
 	Config                map[string]any `bun:"config,type:jsonb,notnull"  json:"config"`
 	RequiredConnectorTags []string       `bun:"required_connector_tags,type:jsonb,notnull" json:"required_connector_tags"`
 	IsActive              bool           `bun:"is_active,notnull"          json:"is_active"`
-	CreatedAt             time.Time      `bun:"created_at,notnull"         json:"created_at"`
-	UpdatedAt             time.Time      `bun:"updated_at,notnull"         json:"updated_at"`
+	// Owner is the accountable party for this governed system (an email
+	// or team handle), carried as inventory data. Findings on this
+	// application's accounts inherit it for routing. Nullable — not
+	// every application has a declared owner yet.
+	Owner     *string   `bun:"owner"                      json:"owner,omitempty"`
+	CreatedAt time.Time `bun:"created_at,notnull"         json:"created_at"`
+	UpdatedAt time.Time `bun:"updated_at,notnull"         json:"updated_at"`
 }

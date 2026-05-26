@@ -88,7 +88,7 @@ func TestFindMatchingMQTriggers(t *testing.T) {
 
 func TestExtractArgsFromPayload(t *testing.T) {
 	spec := map[string]any{
-		"subject_ref":    "subject_ref",
+		"subject_ref":     "subject_ref",
 		"idempotency_key": "trace.id",
 	}
 	payload := map[string]any{

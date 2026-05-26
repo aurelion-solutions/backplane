@@ -191,8 +191,8 @@ func buildSchema[T any]() (map[string]any, *jsonschema.Schema, error) {
 		// Anonymous, lazy-decoded args structs typically have flat
 		// JSON; we keep allow-additional-properties = false so unknown
 		// keys at handler input are caught early.
-		ExpandedStruct:            true,
-		DoNotReference:            true,
+		ExpandedStruct:             true,
+		DoNotReference:             true,
 		RequiredFromJSONSchemaTags: false,
 	}
 	rawSchema := reflector.Reflect(zero)

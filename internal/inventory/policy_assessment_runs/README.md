@@ -28,7 +28,7 @@ the run in place — it's the audit ledger.
 
 ## Trigger paths
 
-- Manual button in Lens → `POST /api/v0/assessments` (sync API entry)
+- Manual trigger → `POST /api/v0/assessments` (sync API entry)
 - Worker pipeline `policy_assessment` → schedule / matcher
 - Cartridge-driven schedule via the orchestrator beat
 

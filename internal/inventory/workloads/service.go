@@ -115,6 +115,12 @@ func (s *Service) List(ctx context.Context, limit, offset int) ([]*Workload, int
 	return s.repo.List(ctx, limit, offset)
 }
 
+// ListByApplication returns a paginated slice + total of the workloads
+// bound to one application.
+func (s *Service) ListByApplication(ctx context.Context, appID uuid.UUID, limit, offset int) ([]*Workload, int, error) {
+	return s.repo.ListByApplication(ctx, appID, limit, offset)
+}
+
 // Update applies an aggregate patch and emits one updated event.
 func (s *Service) Update(ctx context.Context, id uuid.UUID, in PatchPayload) (*Workload, error) {
 	if err := in.Validate(); err != nil {

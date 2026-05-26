@@ -82,13 +82,13 @@ const (
 type WorkerSlot struct {
 	bun.BaseModel `bun:"table:worker_slots,alias:ws"`
 
-	WorkerID         string    `bun:"worker_id,pk"                json:"worker_id"`
-	Hostname         string    `bun:"hostname,notnull"            json:"hostname"`
-	PID              int       `bun:"pid,notnull"                 json:"pid"`
-	SlotIndex        int       `bun:"slot_index,notnull"          json:"slot_index"`
-	StartedAt        time.Time `bun:"started_at,notnull"          json:"started_at"`
-	LastHeartbeatAt  time.Time `bun:"last_heartbeat_at,notnull"   json:"last_heartbeat_at"`
-	Tags             []string  `bun:"tags,array"                  json:"tags"`
+	WorkerID        string    `bun:"worker_id,pk"                json:"worker_id"`
+	Hostname        string    `bun:"hostname,notnull"            json:"hostname"`
+	PID             int       `bun:"pid,notnull"                 json:"pid"`
+	SlotIndex       int       `bun:"slot_index,notnull"          json:"slot_index"`
+	StartedAt       time.Time `bun:"started_at,notnull"          json:"started_at"`
+	LastHeartbeatAt time.Time `bun:"last_heartbeat_at,notnull"   json:"last_heartbeat_at"`
+	Tags            []string  `bun:"tags,array"                  json:"tags"`
 }
 
 // WorkerSummary is the per-slot view returned by GET /api/v0/workers.
@@ -96,22 +96,22 @@ type WorkerSlot struct {
 // slots) with the derived active-runs aggregate from pipeline_runs
 // (zero for idle slots).
 type WorkerSummary struct {
-	WorkerID            string     `bun:"worker_id"             json:"worker_id"`
-	Hostname            string     `bun:"hostname"              json:"hostname"`
-	PID                 int        `bun:"pid"                   json:"pid"`
-	SlotIndex           int        `bun:"slot_index"            json:"slot_index"`
-	StartedAt           time.Time  `bun:"started_at"            json:"started_at"`
-	LastHeartbeatAt     time.Time  `bun:"last_heartbeat_at"     json:"last_heartbeat_at"`
-	Tags                []string   `bun:"tags,array"            json:"tags"`
-	ActiveRuns          int        `bun:"active_runs"           json:"active_runs"`
-	EarliestRunStartAt  *time.Time `bun:"earliest_run_start_at" json:"earliest_run_started_at,omitempty"`
+	WorkerID           string     `bun:"worker_id"             json:"worker_id"`
+	Hostname           string     `bun:"hostname"              json:"hostname"`
+	PID                int        `bun:"pid"                   json:"pid"`
+	SlotIndex          int        `bun:"slot_index"            json:"slot_index"`
+	StartedAt          time.Time  `bun:"started_at"            json:"started_at"`
+	LastHeartbeatAt    time.Time  `bun:"last_heartbeat_at"     json:"last_heartbeat_at"`
+	Tags               []string   `bun:"tags,array"            json:"tags"`
+	ActiveRuns         int        `bun:"active_runs"           json:"active_runs"`
+	EarliestRunStartAt *time.Time `bun:"earliest_run_start_at" json:"earliest_run_started_at,omitempty"`
 	// CurrentRunID + CurrentPipeline are populated when the slot
 	// currently holds at least one run (status='running' | 'cancelling').
 	// `MIN(id)` is used to pick a stable representative when a slot
 	// holds more than one — that never happens in the current runner
 	// (one in-flight run per slot), but the join is defensive.
-	CurrentRunID       *string `bun:"current_run_id"  json:"current_run_id,omitempty"`
-	CurrentPipeline    *string `bun:"current_pipeline" json:"current_pipeline_name,omitempty"`
+	CurrentRunID    *string `bun:"current_run_id"  json:"current_run_id,omitempty"`
+	CurrentPipeline *string `bun:"current_pipeline" json:"current_pipeline_name,omitempty"`
 }
 
 // PipelineRun is one execution attempt of a named pipeline definition.

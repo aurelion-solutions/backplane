@@ -35,20 +35,27 @@ func RegisterRoutes(g *echo.Group, repo Repository) {
 func listHandler(repo Repository) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		f := ListFilter{
-			Kind:     c.QueryParam("kind"),
-			Status:   c.QueryParam("status"),
-			Severity: c.QueryParam("severity"),
-			Limit:    parseIntDefault(c.QueryParam("limit"), 100),
-			Offset:   parseIntDefault(c.QueryParam("offset"), 0),
+			Kind:         c.QueryParam("kind"),
+			ExcludeKind:  c.QueryParam("exclude_kind"),
+			TargetType:   c.QueryParam("target_type"),
+			Status:       c.QueryParam("status"),
+			Severity:     c.QueryParam("severity"),
+			Source:       c.QueryParam("source"),
+			CartridgeRef: c.QueryParam("cartridge"),
+			Owner:        c.QueryParam("owner"),
+			Limit:        parseIntDefault(c.QueryParam("limit"), 100),
+			Offset:       parseIntDefault(c.QueryParam("offset"), 0),
 		}
 		for _, p := range []struct {
 			q   string
 			dst **uuid.UUID
 		}{
 			{"principal_id", &f.PrincipalID},
-			{"account_id", &f.AccountID},
+			{"target_id", &f.TargetID},
+			{"application_id", &f.ApplicationID},
 			{"policy_id", &f.PolicyID},
 			{"assessment_run_id", &f.AssessmentRunID},
+			{"last_seen_run_id", &f.LastSeenRunID},
 		} {
 			if s := c.QueryParam(p.q); s != "" {
 				id, err := uuid.Parse(s)

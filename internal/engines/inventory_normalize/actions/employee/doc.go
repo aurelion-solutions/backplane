@@ -16,19 +16,19 @@
 //     by (source, external_id)).
 //  4. Resolves the Person:
 //     - direct determinator: for each is_determinator=TRUE mapping,
-//       find a Person via persons.AttributeLookup.FindByAttribute.
-//       On miss + a primary provider, CREATE a Person with the
-//       first determinator value as initial attribute.
+//     find a Person via persons.AttributeLookup.FindByAttribute.
+//     On miss + a primary provider, CREATE a Person with the
+//     first determinator value as initial attribute.
 //     - upstream: for each allow_upstream=TRUE mapping, find a Person
-//       by (person_key, value). Returns the first hit.
+//     by (person_key, value). Returns the first hit.
 //     - if neither path lands a Person → unresolved (counter only).
 //  5. Upserts all non-determinator mapped attributes into
 //     person_attributes.
 //  6. Selects or creates one Employment for the Person:
 //     - primary provider: SELECT by (person_id, code, start_date);
-//       create with defaults if missing.
+//     create with defaults if missing.
 //     - secondary provider: SELECT any Employment for person_id;
-//       skip the record if none exists yet (wait for primary).
+//     skip the record if none exists yet (wait for primary).
 //  7. Inserts one employment_record_matches row.
 //
 // Writes go through ctx.Tx so the whole step is one transaction.

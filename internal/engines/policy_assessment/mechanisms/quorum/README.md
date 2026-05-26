@@ -13,7 +13,7 @@ verdict — just "not yet").
 - Sensitive access grants requiring co-sign (admin role assignment,
   break-glass).
 - Mitigation acceptance requiring committee approval.
-- Production deploy approvals (if Glyph is wired into that flow).
+- Production deploy approvals.
 
 ## When NOT to use
 
@@ -64,5 +64,5 @@ verdict — just "not yet").
 
 ## Status
 
-Placeholder. Useful when Glyph starts handling sensitive workflows;
+Placeholder. Useful when sensitive approval workflows are handled;
 not first-cut.

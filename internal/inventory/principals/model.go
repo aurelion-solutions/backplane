@@ -13,8 +13,8 @@
 //   - kind + principal_*_id  — which body it represents
 //   - status                 — lifecycle posture (kind-specific)
 //   - is_locked              — operational/admin access lock
-//                              (kind-agnostic, the single switch that
-//                              revokes access for ANY identity)
+//     (kind-agnostic, the single switch that
+//     revokes access for ANY identity)
 //
 // Lifecycle status and lock are intentionally separate axes. A
 // Principal can be in lifecycle `active` AND `is_locked=true` (admin

@@ -23,19 +23,19 @@ import (
 type Policy struct {
 	bun.BaseModel `bun:"table:policies,alias:pol"`
 
-	ID            uuid.UUID      `bun:"id,pk,type:uuid"           json:"id"`
-	CartridgeRef  string         `bun:"cartridge_ref,notnull"     json:"cartridge_ref"`
-	RuleID        string         `bun:"rule_id,notnull"           json:"rule_id"`
-	Name          string         `bun:"name,notnull"              json:"name"`
-	Description   *string        `bun:"description"               json:"description,omitempty"`
-	Mechanism     string         `bun:"mechanism,notnull"         json:"mechanism"`
-	Severity      *string        `bun:"severity"                  json:"severity,omitempty"`
-	OwnerTeam     *string        `bun:"owner_team"                json:"owner_team,omitempty"`
-	Tags          []string       `bun:"tags,array,notnull"        json:"tags"`
-	Version       int            `bun:"version,notnull"           json:"version"`
-	IsActive      bool           `bun:"is_active,notnull"         json:"is_active"`
-	RemovedAt     *time.Time     `bun:"removed_at"                json:"removed_at,omitempty"`
-	Meta          map[string]any `bun:"meta,type:jsonb,notnull"   json:"meta"`
-	CreatedAt     time.Time      `bun:"created_at,notnull"        json:"created_at"`
-	UpdatedAt     time.Time      `bun:"updated_at,notnull"        json:"updated_at"`
+	ID           uuid.UUID      `bun:"id,pk,type:uuid"           json:"id"`
+	CartridgeRef string         `bun:"cartridge_ref,notnull"     json:"cartridge_ref"`
+	RuleID       string         `bun:"rule_id,notnull"           json:"rule_id"`
+	Name         string         `bun:"name,notnull"              json:"name"`
+	Description  *string        `bun:"description"               json:"description,omitempty"`
+	Mechanism    string         `bun:"mechanism,notnull"         json:"mechanism"`
+	Severity     *string        `bun:"severity"                  json:"severity,omitempty"`
+	OwnerTeam    *string        `bun:"owner_team"                json:"owner_team,omitempty"`
+	Tags         []string       `bun:"tags,array,notnull"        json:"tags"`
+	Version      int            `bun:"version,notnull"           json:"version"`
+	IsActive     bool           `bun:"is_active,notnull"         json:"is_active"`
+	RemovedAt    *time.Time     `bun:"removed_at"                json:"removed_at,omitempty"`
+	Meta         map[string]any `bun:"meta,type:jsonb,notnull"   json:"meta"`
+	CreatedAt    time.Time      `bun:"created_at,notnull"        json:"created_at"`
+	UpdatedAt    time.Time      `bun:"updated_at,notnull"        json:"updated_at"`
 }

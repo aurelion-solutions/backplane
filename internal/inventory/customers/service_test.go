@@ -213,7 +213,6 @@ func TestUpdate_strictFourField_listsChanged(t *testing.T) {
 	}
 }
 
-
 func TestUpdate_planTierOnly_noRecompute(t *testing.T) {
 	svc, _, _, rec := newService(t)
 	c, _ := svc.Create(context.Background(), CreatePayload{ExternalID: "cust-1"})

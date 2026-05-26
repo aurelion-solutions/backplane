@@ -20,7 +20,7 @@
 //     transaction so a normalize failure rolls back every PG write
 //     that the action did.
 //
-// The Lens CSV demo wizard targets this endpoint instead of the
+// A synchronous CSV import client targets this endpoint instead of the
 // underlying /ingest one — it wants determinism (one request, one
 // response, "X rows imported and normalized") more than it wants
 // the async pipeline's decoupling.

@@ -25,8 +25,8 @@ type Request struct {
 	// SkipEvent suppresses the post-write
 	// `inventory.ingest.batch_received` MQ emit. Set when the caller
 	// is going to drive normalization itself in the same request
-	// (e.g. the synchronous inventory_import path used by the Lens
-	// CSV demo) and does not want the async pipeline running in
+	// (e.g. the synchronous inventory_import path) and does not
+	// want the async pipeline running in
 	// parallel against the same lake batch.
 	SkipEvent bool
 }

@@ -53,21 +53,31 @@ const (
 type Account struct {
 	bun.BaseModel `bun:"table:accounts,alias:acc"`
 
-	ID             uuid.UUID      `bun:"id,pk,type:uuid"           json:"id"`
-	ApplicationID  uuid.UUID      `bun:"application_id,notnull"    json:"application_id"`
-	Username       string         `bun:"username,notnull"          json:"username"`
-	ExternalID     string         `bun:"external_id,notnull"       json:"external_id"`
-	Source         string         `bun:"source,notnull"            json:"source"`
-	DisplayName    *string        `bun:"display_name"              json:"display_name,omitempty"`
-	Email          *string        `bun:"email"                     json:"email,omitempty"`
-	IsActive       bool           `bun:"is_active,notnull"         json:"is_active"`
-	IsPrivileged   bool           `bun:"is_privileged,notnull"     json:"is_privileged"`
-	MFAEnabled     bool           `bun:"mfa_enabled,notnull"       json:"mfa_enabled"`
-	Status         *string        `bun:"status"                    json:"status,omitempty"`
-	DesiredState   string         `bun:"desired_state,notnull"     json:"desired_state"`
-	ValidatedState string         `bun:"validated_state,notnull"   json:"validated_state"`
-	EffectiveState string         `bun:"effective_state,notnull"   json:"effective_state"`
-	Attrs          map[string]any `bun:"attrs,type:jsonb,notnull"  json:"attrs"`
-	CreatedAt      time.Time      `bun:"created_at,notnull"        json:"created_at"`
-	UpdatedAt      time.Time      `bun:"updated_at,notnull"        json:"updated_at"`
+	ID            uuid.UUID `bun:"id,pk,type:uuid"           json:"id"`
+	ApplicationID uuid.UUID `bun:"application_id,notnull"    json:"application_id"`
+	// PrincipalID is the account-assignment edge: which governed
+	// identity holds this mailbox. NULL = unassigned (an orphan
+	// account). Mirrors workloads.owner_employment_id on the human side.
+	PrincipalID  *uuid.UUID `bun:"principal_id,type:uuid"   json:"principal_id,omitempty"`
+	Username     string     `bun:"username,notnull"          json:"username"`
+	ExternalID   string     `bun:"external_id,notnull"       json:"external_id"`
+	Source       string     `bun:"source,notnull"            json:"source"`
+	DisplayName  *string    `bun:"display_name"              json:"display_name,omitempty"`
+	Email        *string    `bun:"email"                     json:"email,omitempty"`
+	IsActive     bool       `bun:"is_active,notnull"         json:"is_active"`
+	IsPrivileged bool       `bun:"is_privileged,notnull"     json:"is_privileged"`
+	MFAEnabled   bool       `bun:"mfa_enabled,notnull"       json:"mfa_enabled"`
+	// Evidence-presence signals. NULL = the source never evidenced this
+	// datum ⇒ checks depending on it are not_evaluable (a Blind Spot),
+	// rather than silently treating absence as a clean pass.
+	MFAEvidenceAt      *time.Time     `bun:"mfa_evidence_at"           json:"mfa_evidence_at,omitempty"`
+	OwnerEvidenceAt    *time.Time     `bun:"owner_evidence_at"         json:"owner_evidence_at,omitempty"`
+	LastUsedEvidenceAt *time.Time     `bun:"last_used_evidence_at"     json:"last_used_evidence_at,omitempty"`
+	Status             *string        `bun:"status"                    json:"status,omitempty"`
+	DesiredState       string         `bun:"desired_state,notnull"     json:"desired_state"`
+	ValidatedState     string         `bun:"validated_state,notnull"   json:"validated_state"`
+	EffectiveState     string         `bun:"effective_state,notnull"   json:"effective_state"`
+	Attrs              map[string]any `bun:"attrs,type:jsonb,notnull"  json:"attrs"`
+	CreatedAt          time.Time      `bun:"created_at,notnull"        json:"created_at"`
+	UpdatedAt          time.Time      `bun:"updated_at,notnull"        json:"updated_at"`
 }

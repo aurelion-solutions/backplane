@@ -57,4 +57,13 @@ type AssessmentRun struct {
 	ErrorMessage         *string        `bun:"error_message"                            json:"error_message,omitempty"`
 	CreatedAt            time.Time      `bun:"created_at,notnull"                       json:"created_at"`
 	CreatedBy            *string        `bun:"created_by"                               json:"created_by,omitempty"`
+
+	// Temporal anchors (Slice 1). AsOf is the point in time the run
+	// reflects; Period* stay nil until the Slice 5 period query uses
+	// them. OutcomesByKind tallies the ternary outcomes
+	// (matched / not_matched / not_evaluable) for the health header.
+	AsOf           *time.Time     `bun:"as_of"                       json:"as_of,omitempty"`
+	PeriodStart    *time.Time     `bun:"period_start"                json:"period_start,omitempty"`
+	PeriodEnd      *time.Time     `bun:"period_end"                  json:"period_end,omitempty"`
+	OutcomesByKind map[string]int `bun:"outcomes_by_kind,type:jsonb" json:"outcomes_by_kind,omitempty"`
 }

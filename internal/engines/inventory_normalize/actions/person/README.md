@@ -7,8 +7,8 @@ identities into the `persons` table.
 
 A Person is the identity-graph anchor: every `Employment` row points
 at a `Person`, the resolver in `normalize.employee` reaches for a
-Person by `external_id`, and downstream lookups (e.g. case display
-name in Journey) terminate on `Person.full_name`. The action exists
+Person by `external_id`, and downstream lookups (e.g. a case display
+name) terminate on `Person.full_name`. The action exists
 so a CSV / connector can land a flat list of people without going
 through the heavier employee determinator.
 

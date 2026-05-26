@@ -24,15 +24,15 @@ import (
 type Pipeline struct {
 	bun.BaseModel `bun:"table:pipelines,alias:pip"`
 
-	ID            uuid.UUID      `bun:"id,pk,type:uuid"           json:"id"`
-	CartridgeRef  string         `bun:"cartridge_ref,notnull"     json:"cartridge_ref"`
-	Name          string         `bun:"name,notnull"              json:"name"`
-	Version       int            `bun:"version,notnull"           json:"version"`
-	ContentHash   string         `bun:"content_hash,notnull"      json:"content_hash"`
-	SourcePath    string         `bun:"source_path,notnull"       json:"source_path"`
-	IsActive      bool           `bun:"is_active,notnull"         json:"is_active"`
-	RemovedAt     *time.Time     `bun:"removed_at"                json:"removed_at,omitempty"`
-	Meta          map[string]any `bun:"meta,type:jsonb,notnull"   json:"meta"`
-	CreatedAt     time.Time      `bun:"created_at,notnull"        json:"created_at"`
-	UpdatedAt     time.Time      `bun:"updated_at,notnull"        json:"updated_at"`
+	ID           uuid.UUID      `bun:"id,pk,type:uuid"           json:"id"`
+	CartridgeRef string         `bun:"cartridge_ref,notnull"     json:"cartridge_ref"`
+	Name         string         `bun:"name,notnull"              json:"name"`
+	Version      int            `bun:"version,notnull"           json:"version"`
+	ContentHash  string         `bun:"content_hash,notnull"      json:"content_hash"`
+	SourcePath   string         `bun:"source_path,notnull"       json:"source_path"`
+	IsActive     bool           `bun:"is_active,notnull"         json:"is_active"`
+	RemovedAt    *time.Time     `bun:"removed_at"                json:"removed_at,omitempty"`
+	Meta         map[string]any `bun:"meta,type:jsonb,notnull"   json:"meta"`
+	CreatedAt    time.Time      `bun:"created_at,notnull"        json:"created_at"`
+	UpdatedAt    time.Time      `bun:"updated_at,notnull"        json:"updated_at"`
 }

@@ -38,7 +38,20 @@ func listHandler(svc *Service) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		limit := parseIntDefault(c.QueryParam("limit"), 100)
 		offset := parseIntDefault(c.QueryParam("offset"), 0)
-		items, total, err := svc.List(c.Request().Context(), limit, offset)
+		var (
+			items []*Workload
+			total int
+			err   error
+		)
+		if raw := c.QueryParam("application_id"); raw != "" {
+			appID, perr := uuid.Parse(raw)
+			if perr != nil {
+				return c.JSON(http.StatusBadRequest, errorBody(perr))
+			}
+			items, total, err = svc.ListByApplication(c.Request().Context(), appID, limit, offset)
+		} else {
+			items, total, err = svc.List(c.Request().Context(), limit, offset)
+		}
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, errorBody(err))
 		}

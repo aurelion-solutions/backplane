@@ -69,7 +69,7 @@ Adding a new dataset = one line in `datasetActions` in
 
 The async path (`/ingest` → MQ → normalize-action) is the right
 answer for connector traffic — decoupled, retryable, observable
-through the pipeline catalog. The Lens CSV demo wizard has a
+through the pipeline catalog. A synchronous CSV import client has a
 different requirement: one request, one response, with a clear
 "rows imported and normalized" answer in the body. This package is
 the explicit synchronous path for that case.

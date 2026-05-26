@@ -96,14 +96,14 @@ type ListRunsFilters struct {
 // RunUpdateFields carries the optional column writes that a
 // status-guarded UPDATE can perform alongside the status transition.
 type RunUpdateFields struct {
-	WorkerID         *string
-	ClearWorkerID    bool
-	LastHeartbeatAt  *time.Time
-	ClearHeartbeat   bool
-	StartedAt        *time.Time
-	ClearStartedAt   bool
-	FinishedAt       *time.Time
-	ErrorMsg         *string
+	WorkerID        *string
+	ClearWorkerID   bool
+	LastHeartbeatAt *time.Time
+	ClearHeartbeat  bool
+	StartedAt       *time.Time
+	ClearStartedAt  bool
+	FinishedAt      *time.Time
+	ErrorMsg        *string
 }
 
 // StepUpdateFields is the step-level equivalent.

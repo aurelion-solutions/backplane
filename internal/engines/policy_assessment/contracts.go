@@ -51,6 +51,16 @@ type Output struct {
 	// contributes nothing to aggregation.
 	Matched bool
 
+	// NotEvaluable is true when a stack_check precondition failed: a
+	// truth input the policy requires was absent, so the mechanism was
+	// not run. MissingEvidence then lists the absent truth-input keys.
+	// Mutually exclusive with Matched. This is the Blind Spots path.
+	NotEvaluable bool
+
+	// MissingEvidence lists the absent truth-input keys when
+	// NotEvaluable is true; empty otherwise.
+	MissingEvidence []string
+
 	// Result carries the canonical RuleResult (Decision and/or
 	// ProjectedFacts). May be empty when the rule did not fire.
 	Result RuleResult

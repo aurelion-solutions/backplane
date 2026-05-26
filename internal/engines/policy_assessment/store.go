@@ -166,4 +166,3 @@ func tagsSubset(tags []string, facetSet map[string]struct{}) bool {
 	}
 	return true
 }
-

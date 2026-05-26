@@ -21,16 +21,16 @@ import (
 type CapabilityGrant struct {
 	bun.BaseModel `bun:"table:capability_grants,alias:cg"`
 
-	ID                         uuid.UUID  `bun:"id,pk,type:uuid"                         json:"id"`
-	AccountID                  uuid.UUID  `bun:"account_id,notnull"                      json:"account_id"`
-	CapabilityID               uuid.UUID  `bun:"capability_id,notnull"                   json:"capability_id"`
-	ScopeKeyID                 uuid.UUID  `bun:"scope_key_id,notnull"                    json:"scope_key_id"`
-	ScopeValue                 *string    `bun:"scope_value"                             json:"scope_value,omitempty"`
-	ApplicationID              uuid.UUID  `bun:"application_id,notnull"                  json:"application_id"`
-	SourceGrantExternalID      string     `bun:"source_grant_external_id,notnull"        json:"source_grant_external_id"`
-	SourceCapabilityMappingID  uuid.UUID  `bun:"source_capability_mapping_id,notnull"    json:"source_capability_mapping_id"`
-	ObservedAt                 time.Time  `bun:"observed_at,notnull"                     json:"observed_at"`
-	TombstonedAt               *time.Time `bun:"tombstoned_at"                           json:"tombstoned_at,omitempty"`
-	CreatedAt                  time.Time  `bun:"created_at,notnull"                      json:"created_at"`
-	UpdatedAt                  time.Time  `bun:"updated_at,notnull"                      json:"updated_at"`
+	ID                        uuid.UUID  `bun:"id,pk,type:uuid"                         json:"id"`
+	AccountID                 uuid.UUID  `bun:"account_id,notnull"                      json:"account_id"`
+	CapabilityID              uuid.UUID  `bun:"capability_id,notnull"                   json:"capability_id"`
+	ScopeKeyID                uuid.UUID  `bun:"scope_key_id,notnull"                    json:"scope_key_id"`
+	ScopeValue                *string    `bun:"scope_value"                             json:"scope_value,omitempty"`
+	ApplicationID             uuid.UUID  `bun:"application_id,notnull"                  json:"application_id"`
+	SourceGrantExternalID     string     `bun:"source_grant_external_id,notnull"        json:"source_grant_external_id"`
+	SourceCapabilityMappingID uuid.UUID  `bun:"source_capability_mapping_id,notnull"    json:"source_capability_mapping_id"`
+	ObservedAt                time.Time  `bun:"observed_at,notnull"                     json:"observed_at"`
+	TombstonedAt              *time.Time `bun:"tombstoned_at"                           json:"tombstoned_at,omitempty"`
+	CreatedAt                 time.Time  `bun:"created_at,notnull"                      json:"created_at"`
+	UpdatedAt                 time.Time  `bun:"updated_at,notnull"                      json:"updated_at"`
 }

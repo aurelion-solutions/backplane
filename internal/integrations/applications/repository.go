@@ -83,7 +83,7 @@ func (r *BunRepository) Insert(ctx context.Context, app *Application) error {
 func (r *BunRepository) Update(ctx context.Context, app *Application) error {
 	_, err := r.db.NewUpdate().
 		Model(app).
-		Column("name", "code", "config", "required_connector_tags", "is_active", "updated_at").
+		Column("name", "code", "config", "required_connector_tags", "is_active", "owner", "updated_at").
 		Where("id = ?", app.ID).
 		Exec(ctx)
 	return err

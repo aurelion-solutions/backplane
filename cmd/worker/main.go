@@ -49,15 +49,25 @@ import (
 	"github.com/aurelion-solutions/backplane/internal/inventory/accounts"
 	"github.com/aurelion-solutions/backplane/internal/inventory/capability_grants"
 	"github.com/aurelion-solutions/backplane/internal/inventory/capability_mappings"
+	"github.com/aurelion-solutions/backplane/internal/inventory/consent"
 	"github.com/aurelion-solutions/backplane/internal/inventory/employee_provider_mappings"
 	"github.com/aurelion-solutions/backplane/internal/inventory/employment_record_matches"
+	"github.com/aurelion-solutions/backplane/internal/inventory/employments"
+	"github.com/aurelion-solutions/backplane/internal/inventory/evidence_chain"
 	"github.com/aurelion-solutions/backplane/internal/inventory/findings"
 	"github.com/aurelion-solutions/backplane/internal/inventory/org_units"
 	"github.com/aurelion-solutions/backplane/internal/inventory/persons"
 	"github.com/aurelion-solutions/backplane/internal/inventory/policy_assessment_runs"
+	"github.com/aurelion-solutions/backplane/internal/inventory/policy_evaluation_outcomes"
+	"github.com/aurelion-solutions/backplane/internal/inventory/principals"
+	"github.com/aurelion-solutions/backplane/internal/inventory/secrets"
+	"github.com/aurelion-solutions/backplane/internal/inventory/shared"
+	"github.com/aurelion-solutions/backplane/internal/inventory/workload_lineage"
+	"github.com/aurelion-solutions/backplane/internal/inventory/workloads"
 	"github.com/aurelion-solutions/backplane/internal/platform/secretmanagers"
 	"github.com/aurelion-solutions/backplane/internal/platform/siem"
 	"github.com/aurelion-solutions/backplane/internal/platform/storage"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 )
 
@@ -205,14 +215,40 @@ func run(log *slog.Logger) error {
 		log.Info("policy prepare done", slog.Int("ok", ok))
 	}
 
+	// Lineage resolver + snapshot repo for the NHI assessment pass.
+	wlsRepo := workloads.NewBunRepository(db)
+	empsRepo := employments.NewBunRepository(db)
+	personsRepo := persons.NewBunRepository(db)
+	lineageRepo := workload_lineage.NewBunRepository(db)
+	lineageResolver := workload_lineage.NewResolver(
+		workerLineageWorkloadAdapter{repo: wlsRepo},
+		workerLineageEmploymentAdapter{repo: empsRepo},
+		workerLineagePersonAdapter{repo: personsRepo},
+	)
+
 	// policy_assessment.assess action — pipeline-runnable unit that
 	// evaluates the active policy catalogue against the inventory
 	// snapshot and persists findings.
 	assess.Register(reg, assess.Deps{
-		DB:           db,
-		AccountsRepo: accounts.NewBunRepository(),
+		DB:             db,
+		AccountsRepo:   accounts.NewBunRepository(),
+		WorkloadsRepo:  wlsRepo,
+		PrincipalsRepo: principals.NewBunRepository(db),
+		SecretsPlain:   secrets.NewPlainBunRepository(),
+		SecretsCert:    secrets.NewCertBunRepository(),
+		ConsentApps:    consent.NewAppBunRepository(),
+		ConsentGrants:  consent.NewGrantBunRepository(),
+		OwnerTerminus: workerOwnerTerminusAdapter{
+			principals: principals.NewBunRepository(db),
+			emps:       empsRepo,
+			resolver:   lineageResolver,
+		},
+		Lineage:      workerLineageResolverAdapter{resolver: lineageResolver},
+		Snapshots:    workerSnapshotWriterAdapter{resolver: lineageResolver, repo: lineageRepo},
 		RunsRepo:     policy_assessment_runs.NewBunRepository(db),
 		FindingsRepo: findings.NewBunRepository(db),
+		OutcomesSvc:  policy_evaluation_outcomes.NewService(policy_evaluation_outcomes.NewBunRepository(db)),
+		EvidenceSvc:  evidence_chain.NewService(evidence_chain.NewBunRepository(db)),
 		Store:        policyStore,
 		Dispatcher:   policyDispatcher,
 	})
@@ -330,6 +366,175 @@ func envTags(key string) []string {
 		out = append(out, t)
 	}
 	return out
+}
+
+// -------- workload_lineage port adapters --------
+
+// workerLineageWorkloadAdapter maps workloads.Repository → workload_lineage.WorkloadReader.
+type workerLineageWorkloadAdapter struct{ repo workloads.Repository }
+
+func (a workerLineageWorkloadAdapter) GetByID(ctx context.Context, id uuid.UUID) (*workload_lineage.WorkloadRef, error) {
+	w, err := a.repo.GetByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, workloads.ErrNotFound) {
+			return nil, workload_lineage.ErrReaderNotFound
+		}
+		return nil, err
+	}
+	return &workload_lineage.WorkloadRef{
+		ID:                w.ID,
+		ExternalID:        w.ExternalID,
+		Name:              w.Name,
+		OwnerEmploymentID: w.OwnerEmploymentID,
+	}, nil
+}
+
+// workerLineageEmploymentAdapter maps employments.Repository → workload_lineage.EmploymentReader.
+type workerLineageEmploymentAdapter struct{ repo employments.Repository }
+
+func (a workerLineageEmploymentAdapter) GetByID(ctx context.Context, id uuid.UUID) (*workload_lineage.EmploymentRef, error) {
+	e, err := a.repo.GetByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, employments.ErrNotFound) {
+			return nil, workload_lineage.ErrReaderNotFound
+		}
+		return nil, err
+	}
+	return &workload_lineage.EmploymentRef{
+		ID:        e.ID,
+		PersonID:  e.PersonID,
+		Code:      e.Code,
+		StartDate: e.StartDate,
+		EndDate:   e.EndDate,
+	}, nil
+}
+
+func (a workerLineageEmploymentAdapter) ListByPerson(ctx context.Context, personID uuid.UUID) ([]*workload_lineage.EmploymentRef, error) {
+	emps, err := a.repo.ListByPerson(ctx, personID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*workload_lineage.EmploymentRef, len(emps))
+	for i, e := range emps {
+		out[i] = &workload_lineage.EmploymentRef{
+			ID:        e.ID,
+			PersonID:  e.PersonID,
+			Code:      e.Code,
+			StartDate: e.StartDate,
+			EndDate:   e.EndDate,
+		}
+	}
+	return out, nil
+}
+
+// workerLineagePersonAdapter maps persons.Repository → workload_lineage.PersonReader.
+type workerLineagePersonAdapter struct{ repo persons.Repository }
+
+func (a workerLineagePersonAdapter) GetByID(ctx context.Context, id uuid.UUID) (*workload_lineage.PersonRef, error) {
+	p, err := a.repo.GetByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, persons.ErrNotFound) {
+			return nil, workload_lineage.ErrReaderNotFound
+		}
+		return nil, err
+	}
+	return &workload_lineage.PersonRef{
+		ID:         p.ID,
+		ExternalID: p.ExternalID,
+		FullName:   p.FullName,
+	}, nil
+}
+
+// workerLineageResolverAdapter maps workload_lineage.Resolver → assess.LineageResolver.
+// It adapts the full OwnershipChain to assess's local ResolvedChain view.
+// workerOwnerTerminusAdapter resolves a secret owner's terminus for the
+// assess secret pass: workload principals route through the lineage
+// resolver; employment principals are terminated when the person holds
+// no active employment.
+type workerOwnerTerminusAdapter struct {
+	principals principals.Repository
+	emps       employments.Repository
+	resolver   *workload_lineage.Resolver
+}
+
+func (a workerOwnerTerminusAdapter) Resolve(ctx context.Context, principalID uuid.UUID) (string, error) {
+	p, err := a.principals.GetByID(ctx, principalID)
+	if err != nil {
+		if errors.Is(err, principals.ErrNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	switch p.Kind {
+	case shared.PrincipalKindWorkload:
+		if p.PrincipalWorkloadID == nil {
+			return "", nil
+		}
+		chain, rerr := a.resolver.Resolve(ctx, *p.PrincipalWorkloadID)
+		if rerr != nil {
+			return "", rerr
+		}
+		return chain.Terminus, nil
+	case shared.PrincipalKindEmployment:
+		if p.PrincipalEmploymentID == nil {
+			return "", nil
+		}
+		emp, eerr := a.emps.GetByID(ctx, *p.PrincipalEmploymentID)
+		if eerr != nil {
+			return "", eerr
+		}
+		all, aerr := a.emps.ListByPerson(ctx, emp.PersonID)
+		if aerr != nil {
+			return "", aerr
+		}
+		active, cerr := a.emps.ListActiveByPerson(ctx, emp.PersonID, time.Now().UTC())
+		if cerr != nil {
+			return "", cerr
+		}
+		if len(all) > 0 && len(active) == 0 {
+			return "terminated_human", nil
+		}
+		return "active_human", nil
+	}
+	return "", nil
+}
+
+type workerLineageResolverAdapter struct{ resolver *workload_lineage.Resolver }
+
+func (a workerLineageResolverAdapter) Resolve(ctx context.Context, workloadID uuid.UUID) (assess.ResolvedChain, error) {
+	chain, err := a.resolver.Resolve(ctx, workloadID)
+	if err != nil {
+		return assess.ResolvedChain{}, err
+	}
+	rc := assess.ResolvedChain{
+		WorkloadID: chain.WorkloadID,
+		Terminus:   chain.Terminus,
+	}
+	// Extract owner details from the person link if present.
+	for _, l := range chain.Links {
+		if l.Kind == "person" {
+			rc.OwnerPersonID = l.RefID
+			rc.OwnerLabel = l.Label
+			rc.LastTerminationDate = l.EndDate
+		}
+	}
+	return rc, nil
+}
+
+// workerSnapshotWriterAdapter satisfies assess.SnapshotWriter by re-resolving
+// the full OwnershipChain and persisting it via the lineage repository.
+// This is the ONLY path that writes snapshots (R1).
+type workerSnapshotWriterAdapter struct {
+	resolver *workload_lineage.Resolver
+	repo     *workload_lineage.BunRepository
+}
+
+func (a workerSnapshotWriterAdapter) RecordSnapshot(ctx context.Context, workloadID uuid.UUID) error {
+	chain, err := a.resolver.Resolve(ctx, workloadID)
+	if err != nil {
+		return err
+	}
+	return a.repo.RecordSnapshot(ctx, chain)
 }
 
 // Suppress unused-import warning when one of the imports isn't yet

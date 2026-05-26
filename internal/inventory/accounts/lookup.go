@@ -23,6 +23,7 @@ var ErrNotFound = errors.New("accounts: not found")
 // make stubbing in tests trivial.
 type Lookup interface {
 	GetByApplicationAndUsername(ctx context.Context, tx bun.IDB, applicationID uuid.UUID, username string) (*Account, error)
+	GetByID(ctx context.Context, tx bun.IDB, id uuid.UUID) (*Account, error)
 }
 
 // LookupBunRepository is the Postgres-backed Lookup implementation.
@@ -43,6 +44,22 @@ func (l *LookupBunRepository) GetByApplicationAndUsername(ctx context.Context, t
 		Model(a).
 		Where("application_id = ?", applicationID).
 		Where("username = ?", username).
+		Scan(ctx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return a, nil
+}
+
+// GetByID returns the Account with the given primary key, or ErrNotFound.
+func (l *LookupBunRepository) GetByID(ctx context.Context, tx bun.IDB, id uuid.UUID) (*Account, error) {
+	a := new(Account)
+	err := tx.NewSelect().
+		Model(a).
+		Where("id = ?", id).
 		Scan(ctx)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

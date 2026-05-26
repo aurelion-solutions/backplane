@@ -35,7 +35,10 @@ func (r *memRepo) List(_ context.Context, f ListFilter) ([]*Finding, int, error)
 		if f.PrincipalID != nil && (v.PrincipalID == nil || *v.PrincipalID != *f.PrincipalID) {
 			continue
 		}
-		if f.AccountID != nil && (v.AccountID == nil || *v.AccountID != *f.AccountID) {
+		if f.TargetType != "" && (v.TargetType == nil || *v.TargetType != f.TargetType) {
+			continue
+		}
+		if f.TargetID != nil && (v.TargetID == nil || *v.TargetID != *f.TargetID) {
 			continue
 		}
 		if f.PolicyID != nil && (v.PolicyID == nil || *v.PolicyID != *f.PolicyID) {
@@ -47,10 +50,25 @@ func (r *memRepo) List(_ context.Context, f ListFilter) ([]*Finding, int, error)
 		if f.Kind != "" && v.Kind != f.Kind {
 			continue
 		}
+		if f.ExcludeKind != "" && v.Kind == f.ExcludeKind {
+			continue
+		}
 		if f.Status != "" && v.Status != f.Status {
 			continue
 		}
 		if f.Severity != "" && v.Severity != f.Severity {
+			continue
+		}
+		if f.ApplicationID != nil && (v.ApplicationID == nil || *v.ApplicationID != *f.ApplicationID) {
+			continue
+		}
+		if f.Source != "" && (v.Source == nil || *v.Source != f.Source) {
+			continue
+		}
+		if f.CartridgeRef != "" && (v.CartridgeRef == nil || *v.CartridgeRef != f.CartridgeRef) {
+			continue
+		}
+		if f.Owner != "" && (v.OwnerRef == nil || *v.OwnerRef != f.Owner) {
 			continue
 		}
 		out = append(out, v)
@@ -71,11 +89,25 @@ func (r *memRepo) Insert(_ context.Context, row *Finding) error {
 	return nil
 }
 
+func (r *memRepo) TouchLastSeen(_ context.Context, evidenceHash string, runID uuid.UUID, evaluatedAt time.Time) (int, error) {
+	n := 0
+	for _, row := range r.rows {
+		if row.EvidenceHash == evidenceHash {
+			row.LastSeenRunID = runID
+			row.EvaluatedAt = evaluatedAt
+			n++
+		}
+	}
+	return n, nil
+}
+
 func mkFinding(kind, severity, status string, principal *uuid.UUID) *Finding {
 	now := time.Now().UTC()
+	runID := uuid.New()
 	return &Finding{
 		ID:                        uuid.New(),
-		AssessmentRunID:           uuid.New(),
+		AssessmentRunID:           runID,
+		LastSeenRunID:             runID,
 		Kind:                      kind,
 		PrincipalID:               principal,
 		Severity:                  severity,
@@ -127,11 +159,63 @@ func TestList_FilteringByKindSeverityStatus(t *testing.T) {
 	}
 }
 
+func strp(s string) *string { return &s }
+
+func TestList_FilteringByTriageFields(t *testing.T) {
+	repo := newMemRepo()
+	app := uuid.New()
+
+	priv := mkFinding(KindPrivilegedAccess, SeverityHigh, StatusOpen, nil)
+	priv.ApplicationID = &app
+	priv.Source = strp("okta")
+	priv.CartridgeRef = strp("ispm-core-identity-posture")
+	priv.OwnerRef = strp("security-team@corp.example")
+	_ = repo.Insert(context.Background(), priv)
+
+	gap := mkFinding(KindEvidenceGap, SeverityMedium, StatusOpen, nil)
+	gap.Source = strp("aws")
+	gap.CartridgeRef = strp("ispm-data-quality")
+	gap.OwnerRef = strp("platform-team@corp.example")
+	_ = repo.Insert(context.Background(), gap)
+
+	e := echo.New()
+	RegisterRoutes(e.Group(""), repo)
+
+	cases := []struct {
+		query string
+		want  int
+	}{
+		{"?source=okta", 1},
+		{"?source=aws", 1},
+		{"?cartridge=ispm-core-identity-posture", 1},
+		{"?owner=security-team@corp.example", 1},
+		{"?owner=nobody@corp.example", 0},
+		{"?application_id=" + app.String(), 1},
+		{"?cartridge=ispm-data-quality&owner=platform-team@corp.example", 1},
+		{"?cartridge=ispm-data-quality&owner=security-team@corp.example", 0},
+	}
+	for _, tc := range cases {
+		req := httptest.NewRequest(http.MethodGet, "/findings"+tc.query, nil)
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("query %q status=%d body=%s", tc.query, rec.Code, rec.Body.String())
+		}
+		var resp ListResponse
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		if resp.Total != tc.want {
+			t.Fatalf("query %q total=%d want %d", tc.query, resp.Total, tc.want)
+		}
+	}
+}
+
 func TestGet_FoundAndMissing(t *testing.T) {
 	repo := newMemRepo()
 	f := mkFinding(KindOrphanAccess, SeverityHigh, StatusOpen, nil)
 	acct := uuid.New()
-	f.AccountID = &acct
+	tt := TargetAccount
+	f.TargetType = &tt
+	f.TargetID = &acct
 	_ = repo.Insert(context.Background(), f)
 
 	e := echo.New()

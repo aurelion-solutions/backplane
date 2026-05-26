@@ -10,7 +10,7 @@
 // Generative is reactive: every Recompute call sees a snapshot of
 // the world and produces the diff against the initiatives currently
 // recorded for the principal. It does not subscribe to events
-// itself — callers (Journey pipelines via the orchestrator action,
+// itself — callers (orchestrator pipeline actions,
 // beat-scheduled passes, ad-hoc REST triggers) translate their
 // events into Recompute calls.
 //

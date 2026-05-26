@@ -43,11 +43,11 @@ const PollInterval = 1 * time.Second
 type Outcome string
 
 const (
-	OutcomeIdle           Outcome = "idle"
-	OutcomeCompleted      Outcome = "completed"
-	OutcomeFailed         Outcome = "failed"
-	OutcomeAwaitingEvent  Outcome = "awaiting_event"
-	OutcomeCancelled      Outcome = "cancelled"
+	OutcomeIdle          Outcome = "idle"
+	OutcomeCompleted     Outcome = "completed"
+	OutcomeFailed        Outcome = "failed"
+	OutcomeAwaitingEvent Outcome = "awaiting_event"
+	OutcomeCancelled     Outcome = "cancelled"
 )
 
 // PipelineGetter is the runtime contract the runner uses to look a
@@ -59,13 +59,13 @@ type PipelineGetter interface {
 // Runner is the work-loop driver. One Runner per goroutine; N
 // goroutines per worker process.
 type Runner struct {
-	db       *bun.DB
-	svc      *orchestrator.Service
-	reg      *registry.Registry
-	catalog  PipelineGetter
-	log      *slog.Logger
-	events   events.Sink
-	worker   WorkerIdentity
+	db      *bun.DB
+	svc     *orchestrator.Service
+	reg     *registry.Registry
+	catalog PipelineGetter
+	log     *slog.Logger
+	events  events.Sink
+	worker  WorkerIdentity
 }
 
 // New composes a Runner with all dependencies. The catalog reference

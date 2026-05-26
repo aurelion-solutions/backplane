@@ -59,15 +59,18 @@ import (
 	normalize_person "github.com/aurelion-solutions/backplane/internal/engines/inventory_normalize/actions/person"
 	"github.com/aurelion-solutions/backplane/internal/integrations/applications"
 	"github.com/aurelion-solutions/backplane/internal/integrations/connectors"
+	"github.com/aurelion-solutions/backplane/internal/inventory/access_profile"
 	"github.com/aurelion-solutions/backplane/internal/inventory/accounts"
 	"github.com/aurelion-solutions/backplane/internal/inventory/capabilities"
 	"github.com/aurelion-solutions/backplane/internal/inventory/capability_grants"
 	"github.com/aurelion-solutions/backplane/internal/inventory/capability_mappings"
+	"github.com/aurelion-solutions/backplane/internal/inventory/consent"
 	"github.com/aurelion-solutions/backplane/internal/inventory/customers"
 	"github.com/aurelion-solutions/backplane/internal/inventory/employee_provider_mappings"
 	"github.com/aurelion-solutions/backplane/internal/inventory/employee_records"
 	"github.com/aurelion-solutions/backplane/internal/inventory/employment_record_matches"
 	"github.com/aurelion-solutions/backplane/internal/inventory/employments"
+	"github.com/aurelion-solutions/backplane/internal/inventory/evidence_chain"
 	"github.com/aurelion-solutions/backplane/internal/inventory/findings"
 	"github.com/aurelion-solutions/backplane/internal/inventory/initiatives"
 	"github.com/aurelion-solutions/backplane/internal/inventory/org_units"
@@ -75,8 +78,11 @@ import (
 	inv_pipelines "github.com/aurelion-solutions/backplane/internal/inventory/pipelines"
 	inv_policies "github.com/aurelion-solutions/backplane/internal/inventory/policies"
 	"github.com/aurelion-solutions/backplane/internal/inventory/policy_assessment_runs"
+	"github.com/aurelion-solutions/backplane/internal/inventory/policy_evaluation_outcomes"
 	"github.com/aurelion-solutions/backplane/internal/inventory/principals"
+	"github.com/aurelion-solutions/backplane/internal/inventory/secrets"
 	"github.com/aurelion-solutions/backplane/internal/inventory/shared"
+	"github.com/aurelion-solutions/backplane/internal/inventory/workload_lineage"
 	"github.com/aurelion-solutions/backplane/internal/inventory/workloads"
 	"github.com/aurelion-solutions/backplane/internal/platform/llm"
 	"github.com/aurelion-solutions/backplane/internal/platform/secretmanagers"
@@ -530,6 +536,8 @@ func run(log *slog.Logger) error {
 	pipelinesRepo := inv_pipelines.NewBunRepository(db)
 	assessmentRunsRepo := policy_assessment_runs.NewBunRepository(db)
 	findingsRepo := findings.NewBunRepository(db)
+	policyOutcomesRepo := policy_evaluation_outcomes.NewBunRepository(db)
+	evidenceChainRepo := evidence_chain.NewBunRepository(db)
 
 	policiesSync := core_policies.New(core_policies.Deps{
 		Provider: cartridgesProvider,
@@ -564,13 +572,30 @@ func run(log *slog.Logger) error {
 	inv_pipelines.RegisterRoutes(apiV0, pipelinesRepo)
 	policy_assessment_runs.RegisterRoutes(apiV0, assessmentRunsRepo)
 	findings.RegisterRoutes(apiV0, findingsRepo)
+	policy_evaluation_outcomes.RegisterRoutes(apiV0, policyOutcomesRepo)
+	evidence_chain.RegisterRoutes(apiV0, evidenceChainRepo)
 	orchestrator.RegisterWellKnownRoutes(e, actionReg)
 	applications.RegisterRoutes(apiV0, appsSvc, matchingAdapter{svc: connSvc})
 	connectors.RegisterRoutes(apiV0, connSvc)
 	persons.RegisterRoutes(apiV0, personsSvc)
+	accounts.RegisterRoutes(apiV0, db, accounts.NewBunRepository(), accounts.NewLookupBunRepository())
+	secrets.RegisterRoutes(apiV0, db,
+		secrets.NewPlainBunRepository(), secrets.NewPlainBunRepository(),
+		secrets.NewCertBunRepository(), secrets.NewCertBunRepository())
+	consent.RegisterRoutes(apiV0, db,
+		consent.NewAppBunRepository(), consent.NewAppBunRepository(),
+		consent.NewGrantBunRepository(), consent.NewGrantBunRepository())
+	access_profile.RegisterRoutes(apiV0, access_profile.NewService(access_profile.NewBunRepository(db)))
 	org_units.RegisterRoutes(apiV0, orgUnitsSvc)
 	employments.RegisterRoutes(apiV0, empsSvc)
 	workloads.RegisterRoutes(apiV0, wlsSvc)
+	// Lineage resolver: read-only; NO snapshot writer passed here (R1).
+	lineageResolver := workload_lineage.NewResolver(
+		wlLineageWorkloadAdapter{repo: wlsRepo},
+		wlLineageEmploymentAdapter{repo: empsRepo},
+		wlLineagePersonAdapter{repo: personsRepo},
+	)
+	workload_lineage.RegisterRoutes(apiV0, lineageResolver)
 	customers.RegisterRoutes(apiV0, custSvc)
 	employee_records.RegisterRoutes(apiV0, erSvc)
 	principals.RegisterRoutes(apiV0, principalsSvc)
@@ -835,6 +860,81 @@ func (a principalCustomerAdapter) CustomerState(ctx context.Context, id uuid.UUI
 	return principals.CustomerStateView{
 		Exists:        true,
 		EmailVerified: c.EmailVerified,
+	}, nil
+}
+
+// workload_lineage port adapters — map slice repos to the narrow
+// reader ports declared in internal/inventory/workload_lineage/ports.go.
+
+type wlLineageWorkloadAdapter struct{ repo workloads.Repository }
+
+func (a wlLineageWorkloadAdapter) GetByID(ctx context.Context, id uuid.UUID) (*workload_lineage.WorkloadRef, error) {
+	w, err := a.repo.GetByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, workloads.ErrNotFound) {
+			return nil, workload_lineage.ErrReaderNotFound
+		}
+		return nil, err
+	}
+	return &workload_lineage.WorkloadRef{
+		ID:                w.ID,
+		ExternalID:        w.ExternalID,
+		Name:              w.Name,
+		OwnerEmploymentID: w.OwnerEmploymentID,
+	}, nil
+}
+
+type wlLineageEmploymentAdapter struct{ repo employments.Repository }
+
+func (a wlLineageEmploymentAdapter) GetByID(ctx context.Context, id uuid.UUID) (*workload_lineage.EmploymentRef, error) {
+	e, err := a.repo.GetByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, employments.ErrNotFound) {
+			return nil, workload_lineage.ErrReaderNotFound
+		}
+		return nil, err
+	}
+	return &workload_lineage.EmploymentRef{
+		ID:        e.ID,
+		PersonID:  e.PersonID,
+		Code:      e.Code,
+		StartDate: e.StartDate,
+		EndDate:   e.EndDate,
+	}, nil
+}
+
+func (a wlLineageEmploymentAdapter) ListByPerson(ctx context.Context, personID uuid.UUID) ([]*workload_lineage.EmploymentRef, error) {
+	emps, err := a.repo.ListByPerson(ctx, personID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*workload_lineage.EmploymentRef, len(emps))
+	for i, e := range emps {
+		out[i] = &workload_lineage.EmploymentRef{
+			ID:        e.ID,
+			PersonID:  e.PersonID,
+			Code:      e.Code,
+			StartDate: e.StartDate,
+			EndDate:   e.EndDate,
+		}
+	}
+	return out, nil
+}
+
+type wlLineagePersonAdapter struct{ repo persons.Repository }
+
+func (a wlLineagePersonAdapter) GetByID(ctx context.Context, id uuid.UUID) (*workload_lineage.PersonRef, error) {
+	p, err := a.repo.GetByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, persons.ErrNotFound) {
+			return nil, workload_lineage.ErrReaderNotFound
+		}
+		return nil, err
+	}
+	return &workload_lineage.PersonRef{
+		ID:         p.ID,
+		ExternalID: p.ExternalID,
+		FullName:   p.FullName,
 	}, nil
 }
 

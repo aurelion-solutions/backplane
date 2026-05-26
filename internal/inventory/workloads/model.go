@@ -4,10 +4,9 @@
 
 // Package workloads owns the Workload entity — a non-human identity
 // kind covering service accounts, machine identities, and other
-// workload bodies. Mirrors the kernel NHI semantics for kind =
-// "workload", as a first-class slice rather than a sub-kind of a
-// generic NHI table. Future NHI kinds (api_keys, bots, certificates)
-// get their own slice when they ship.
+// workload bodies. It is a first-class slice rather than a sub-kind of
+// a generic identity table. Other non-human identity kinds (api_keys,
+// bots, certificates) get their own slice when they ship.
 //
 // There is intentionally NO is_locked column here. Access blocking
 // for any identity (employment, workload, customer) lives on the

@@ -53,8 +53,14 @@ type ListFilter struct {
 	ValidatedState string
 	EffectiveState string
 	NeedsApply     bool
-	Limit          int
-	Offset         int
+	// Privileged / MFAEnabled filter by the boolean when non-nil (cheap
+	// posture-count queries). Assigned, when non-nil, narrows to accounts
+	// that do (true) or do not (false) have a principal assignment.
+	Privileged *bool
+	MFAEnabled *bool
+	Assigned   *bool
+	Limit      int
+	Offset     int
 }
 
 // BunRepository is the production Postgres-backed implementation.
@@ -173,6 +179,19 @@ func (r *BunRepository) List(ctx context.Context, tx bun.IDB, f ListFilter) ([]*
 	}
 	if f.NeedsApply {
 		q = q.Where("validated_state <> effective_state")
+	}
+	if f.Privileged != nil {
+		q = q.Where("is_privileged = ?", *f.Privileged)
+	}
+	if f.MFAEnabled != nil {
+		q = q.Where("mfa_enabled = ?", *f.MFAEnabled)
+	}
+	if f.Assigned != nil {
+		if *f.Assigned {
+			q = q.Where("principal_id IS NOT NULL")
+		} else {
+			q = q.Where("principal_id IS NULL")
+		}
 	}
 	q = q.Order("created_at ASC")
 	if f.Limit > 0 {

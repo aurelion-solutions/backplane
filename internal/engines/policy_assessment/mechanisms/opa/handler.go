@@ -76,7 +76,7 @@ func (h *Handler) Prepare(ctx context.Context, entry policy_assessment.Entry) er
 	if module.Package == nil || module.Package.Path == nil {
 		return fmt.Errorf("opa: %s has no package declaration", policyPath)
 	}
-	pkgPath := module.Package.Path.String() // e.g. "data.lens.access_risk.orphaned_account"
+	pkgPath := module.Package.Path.String() // e.g. "data.ispm_core_identity_posture.access_risk.orphaned_access"
 
 	pq, err := rego.New(
 		rego.Query(pkgPath),

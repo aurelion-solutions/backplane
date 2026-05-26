@@ -54,6 +54,15 @@ func (r *memRepo) List(_ context.Context, limit, offset int) ([]*Workload, int, 
 	}
 	return out, total, nil
 }
+func (r *memRepo) ListByApplication(ctx context.Context, appID uuid.UUID, limit, offset int) ([]*Workload, int, error) {
+	filtered := &memRepo{rows: map[uuid.UUID]*Workload{}}
+	for id, w := range r.rows {
+		if w.ApplicationID != nil && *w.ApplicationID == appID {
+			filtered.rows[id] = w
+		}
+	}
+	return filtered.List(ctx, limit, offset)
+}
 func (r *memRepo) Insert(_ context.Context, w *Workload) error {
 	for _, ex := range r.rows {
 		if ex.ExternalID == w.ExternalID {

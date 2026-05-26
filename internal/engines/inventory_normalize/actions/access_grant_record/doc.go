@@ -15,10 +15,10 @@
 //  3. For each grant record:
 //     - resolves the Account by (application_id, username);
 //     - against every mapping, runs the projector:
-//       application_id filter, action_slug filter, XOR resource
-//       match, scope_value resolution;
+//     application_id filter, action_slug filter, XOR resource
+//     match, scope_value resolution;
 //     - upserts the resulting CapabilityGrant(s) by lineage key
-//       (source_grant_external_id, source_capability_mapping_id).
+//     (source_grant_external_id, source_capability_mapping_id).
 //
 // scope_value_source kinds supported now: constant, application_id,
 // principal_attribute, resource_external_id. resource_attribute is

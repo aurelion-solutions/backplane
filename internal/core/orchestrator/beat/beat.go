@@ -30,11 +30,11 @@ const AdvisoryLockKey int64 = 0x4155_5245_4C42_4541
 
 // TickResult summarises what one tick did.
 type TickResult struct {
-	LockAcquired      bool
-	FiredRunIDs       []uuid.UUID
-	SkippedSchedules  int
-	ExpiredRunIDs     []uuid.UUID
-	ExpireFailures    int
+	LockAcquired     bool
+	FiredRunIDs      []uuid.UUID
+	SkippedSchedules int
+	ExpiredRunIDs    []uuid.UUID
+	ExpireFailures   int
 }
 
 // Catalog is the runtime contract Beat uses to enumerate pipeline

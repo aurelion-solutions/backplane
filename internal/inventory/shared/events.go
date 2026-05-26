@@ -42,12 +42,12 @@ const (
 
 // Employment events.
 const (
-	EventEmploymentCreated           = "inventory.employment.created"
-	EventEmploymentUpdated           = "inventory.employment.updated"
-	EventEmploymentEnded             = "inventory.employment.ended"
-	EventEmploymentBulkUpserted      = "inventory.employment.bulk_upserted"
-	EventEmploymentAttributeAdded    = "inventory.employment.attribute_added"
-	EventEmploymentAttributeRemoved  = "inventory.employment.attribute_removed"
+	EventEmploymentCreated          = "inventory.employment.created"
+	EventEmploymentUpdated          = "inventory.employment.updated"
+	EventEmploymentEnded            = "inventory.employment.ended"
+	EventEmploymentBulkUpserted     = "inventory.employment.bulk_upserted"
+	EventEmploymentAttributeAdded   = "inventory.employment.attribute_added"
+	EventEmploymentAttributeRemoved = "inventory.employment.attribute_removed"
 )
 
 // EmployeeRecord events.

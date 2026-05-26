@@ -17,10 +17,10 @@ import (
 // projectInput bundles everything a single (record, mapping) pair
 // needs to project. Kept package-private — the action assembles it.
 type projectInput struct {
-	GrantExternalID string         // record.external_id
-	Resource        string         // payload.resource
-	ResourceKind    string         // payload.resource_kind
-	ActionSlug      string         // payload.action_slug
+	GrantExternalID string // record.external_id
+	Resource        string // payload.resource
+	ResourceKind    string // payload.resource_kind
+	ActionSlug      string // payload.action_slug
 	Account         *accounts.Account
 	Mapping         *capability_mappings.CapabilityMapping
 	Now             time.Time

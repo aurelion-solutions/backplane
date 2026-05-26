@@ -7,6 +7,114 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-05-26
+
+### Added
+
+#### Consent inventory + consent-grant posture
+
+- `internal/inventory/consent/` — new L1 inventory slice. **A consent grant is evidence of delegated access, not identity truth.** Two entities: `consented_application` is the application as it *presented itself* in a consent flow — keyed on the verifiable anchor `(source, client_id)`, with `display_name` / `publisher` / `home_tenant` / `redirect_uris` held as untrusted self-asserted claims beside the one confirmed datum `verified_publisher`; `consent_grant` records that a subject granted an app a set of `scopes` (natural key `(source, external_id)`). Scopes live on the **grant**, not the app — one app receives different scopes from different subjects — and are stored raw; "high risk" is a policy verdict, not a stored fact.
+- **Resolution, not promotion**: a resolver may link a presented app to an already-governed identity via `resolved_principal_id` + `resolution_confidence` (`resolved` / `likely_same` / `ambiguous` / `unresolved` / `spoofing_suspected`); `origin` (`first_party` / `third_party` / `unknown`) is **derived** from that resolution, never asserted by the app. An unresolved app is never minted into a principal of its own — it stays a posture signal, and `principals` keeps meaning "an identity we govern".
+- `internal/migrations/20260525140000_consent.go` — `consented_application` + `consent_grant` tables (resolution/origin/grant_type CHECKs, `(source, client_id)` / `(source, external_id)` unique keys, resolved-principal + app/subject indexes); widens `findings.target_type` and `evidence_chains.normalized_kind` to admit `consented_application` / `consent_grant`.
+- `GET /api/v0/consented-applications[/:id]` and `GET /api/v0/consent-grants[/:id]` — read-only list (app filters: `origin`, `resolution_confidence`, `verified_publisher`, `resolved`, `resolved_principal_id`; grant filters: `grant_type`, `active`, `owned`, `consented_application_id`, `consenting_principal_id`) + lookup-by-id. The `Upsert` write path stays internal to connector/ingest actions.
+- `internal/engines/policy_assessment/actions/assess/` — **consent pass** (`runConsentPass`): evaluates app-level posture against each presented app and grant-level posture against each grant, denormalising the owning app's `origin` / `verified_publisher` into the grant facts so a grant policy can reason about both the scope and who received it. Emits the `scope:consent` facet (disjoint from `scope:account` / `scope:workload` / `scope:secret`), reuses the `OwnerTerminusResolver` port to resolve a consenting principal's terminus, and records findings keyed to the app or the grant on the `(target_type, target_id)` axis.
+- `cartridges/ispm-consent-grants/` — new cartridge, OPA, namespaces `ispm_consent_grants.application.*` and `.grant.*` (8 policies): display-name collision, unverified reputable publisher; plus grant sensitive-scope-to-unresolved-app, high-risk-consent-to-unverified-publisher, consent-without-owner, consent-owner-terminated, stale consent (Blind Spot via `stack_check` on `last_used_evidence`), and critical app-only privileged scope to a third party.
+- `scripts/seed_consent_demo.py` — idempotent demo fabric (uuid5 + ON CONFLICT) seeding both entities against real workloads/humans with a coherent posture story (a resolved first-party app; an unresolved third-party app; a spoofing app impersonating a governed app's name under a foreign anchor; an app claiming an unverified reputable publisher; plus grants covering sensitive scopes, consent by a terminated human, an app-only privileged grant with no last-use Blind Spot, and an orphaned delegated grant).
+
+#### Secret inventory + credential posture
+
+- `internal/inventory/secrets/` — new L1 inventory slice owning two secret entities, split by shape. **Secrets are authentication evidence, not identities.** `secret_plain` holds opaque material (`password` / `connstring` / `token` / `api_key`) with token `scopes` and a value `fingerprint`; `secret_certificate` holds PKI material (`x509` / `openssh`) with `usage[]` and structured PKI columns (subject, issuer, serial, key algorithm/size, `self_signed`, `is_ca`, validity window). Natural key `(source, external_id)` on both.
+- A secret is an **edge, not a node**: `found_in_application_id` / `found_in_location` (the holder / client) → `target_application_id` + `account_id` (what it authenticates to / as), with `principal_id` as the owner/subject. All ends are nullable; a `CHECK` forbids a secret with no locus. A token is usually found in its own target app, while a password / connection string / key is found in a client app's config. A system token vs a PAT is read from the linked principal's kind, not stored as a sub-kind.
+- `internal/migrations/20260524100000_secrets.go` — `secret_plain` + `secret_certificate` tables (kind/format CHECKs, locus CHECK, `(source, external_id)` unique, locus + principal indexes).
+- `GET /api/v0/secrets/plain[/:id]` and `GET /api/v0/secrets/certificates[/:id]` — read-only list (filters: `type`/`format`, `privileged`, `linked`, `target_application_id`, `found_in_application_id`, `principal_id`, `account_id`) + lookup-by-id. The `Upsert` write path stays internal to connector/ingest actions.
+- `internal/engines/policy_assessment/actions/assess/` — **secret pass** (`runSecretPass`): lists both secret tables, builds `Facts` with secret facts in `resource.properties` (lifecycle math precomputed in Go), emits the `scope:secret` facet (never `scope:account`/`scope:workload`, so account/workload policies cannot cross-evaluate secrets), dispatches via the shared `evaluateTarget`, and records findings keyed to the secret. New `OwnerTerminusResolver` port resolves a secret owner's terminus (`employment` principal → person-terminated; `workload` principal → lineage) for the owner-terminated check; implemented in the worker composition root.
+- `cartridges/ispm-credential-posture/` — new cartridge, OPA, namespaces `ispm_credential_posture.credential.*` and `.certificate.*` (11 policies): long-lived secret, expiring/expired, no-owner linkage, owner-terminated, stale/unverifiable use (Blind Spot via `stack_check` on `last_used_evidence`); plus certificate weak-key, self-signed, expiring/expired, over-long validity, owner-terminated, stale. Findings target the secret on the `(target_type, target_id)` axis.
+- `internal/inventory/evidence_chain/` — `normalized_kind` widened to admit `secret_plain` / `secret_certificate` (`internal/migrations/20260525100000_evidence_chain_secret_kinds.go`) so a secret finding's evidence chain can name the secret as its normalized fact.
+- `scripts/seed_secrets_demo.py` — idempotent demo fabric (uuid5 + ON CONFLICT) seeding both secret types against real apps/accounts/principals with a coherent posture story (long-lived API key found in a client repo, healthy workload token, PAT owned by a terminated human, connection string with no owner, expired password, reused-fingerprint key; TLS/SAML/SSH certs covering expiring/expired, weak 1024-bit self-signed, over-long validity, owner-terminated, and missing-last-use Blind Spots).
+
+#### Findings polymorphic target (`target_type` / `target_id`)
+
+- `internal/inventory/findings/model.go` — a finding now carries two independent axes: `principal_id` (the **identity** it concerns — an account's owner or a workload's own principal) and `target_type` + `target_id` (the **artifact** the problem sits on: `account` / `workload` / `secret_plain` / `secret_certificate`). This retires the old `account_id` XOR `principal_id` encoding, which overloaded `principal_id` (it held the workload's principal as a target) and left account findings' owner principal unset.
+- `internal/migrations/20260524140000_findings_polymorphic_target.go` — adds `target_type` (CHECK) + `target_id`, backfills existing rows (`account` → the account, `workload` → the workload behind its principal), fixes the identity axis for account findings (`principal_id` = the account's owner), drops `account_id`, and recreates the idempotency unique key + "anchor to identity or artifact" CHECK over the new axes. `target_id` is a polymorphic reference (no FK — findings are run-scoped snapshots tracked by `last_seen_run_id`); the identity axis keeps its FK.
+- `GET /api/v0/findings?target_type=&target_id=` — findings filter on the new axes.
+
+#### Fixed — data-quality policy scope leak
+
+- The `ispm-data-quality` account-evidence policies (`missing_mfa_evidence`, `missing_owner_evidence`, `missing_last_used_evidence`) carried no `scope:` tag, so their empty tag set was a subset of every facet set and they fired `not_evaluable` (Blind Spot) gaps against the workload and secret populations as well as accounts. Tagged them `scope:account` so they evaluate accounts only; account evaluability is unchanged, the spurious workload/secret gaps are gone.
+
+#### Account-assignment edge + human access-profile projection
+
+- `accounts.principal_id` — new nullable FK (`accounts → principals`, `ON DELETE SET NULL`): the account-assignment edge recording which governed identity holds a mailbox. NULL = unassigned (an orphan account). Mirrors `workloads.owner_employment_id` on the human side. `internal/migrations/20260523140000_accounts_principal_assignment.go` (additive column + partial index).
+- `internal/inventory/access_profile/` — new read-only L1 projection slice. Walks `person → employments → employment-principals → accounts → capability_grants`, plus principal-scoped `initiatives`, joining the catalog (capabilities, scope keys, applications) for labels, and folds it into one nested document grouped by application. Owns no table, emits no events. `terminated`/`active`/`expired` are computed at read time.
+- `GET /api/v0/persons/{id}/access-profile` — assembled human-access tree (read-only; safe on prefetch/HEAD). 404 on unknown person.
+- `GET /api/v0/accounts/{id}` and `GET /api/v0/accounts?application_id=` — read-only account lookup-by-id and paginated list (optionally narrowed to one application) (`internal/inventory/accounts/routes.go` + `Lookup.GetByID` + `Repository.List`). The list also accepts `privileged` / `mfa` / `assigned` boolean filters (cheap posture-count queries — privileged, privileged-without-MFA, unassigned). The account write path (Upsert / Set*State) stays internal to the pipeline; only these reads are exposed. Expose account labels and per-application account posture (privileged / MFA / assignment counts) to read consumers.
+- `GET /api/v0/workloads?application_id=` — the workloads list now accepts an `application_id` filter (`Repository.ListByApplication`), so a single application's NHI population can be paginated server-side instead of filtered client-side. Feeds the Application detail page's paginated workloads table.
+- `scripts/seed_employee_access_demo.py` — idempotent demo fabric (uuid5 + ON CONFLICT): catalog (capabilities, scope keys, one mapping per capability), employment principals + assigned accounts + capability grants + initiatives (with `valid_until` deadlines) for showcase persons — including terminated employees who still hold privileged accounts (the human-side mirror of the orphaned-workload story).
+
+#### Workload owner-chain resolver + workload_owned_by_terminated finding
+
+- `internal/inventory/workload_lineage/` — new L1 inventory slice: recursive ownership chain resolver (workload → owning employment → person → all person's employments). Classifies terminus as `active_human`, `terminated_human`, `unowned`, or `broken_link`. Append-only `workload_lineage_snapshots` table with `(workload_id, chain_hash)` idempotent unique constraint. Snapshot writes happen exclusively in the assess pass (R1 — GET is read-only).
+- `GET /api/v0/workloads/{id}/lineage` — read-only endpoint returning the resolved `OwnershipChain`. No snapshot write on GET.
+- `internal/engines/policy_assessment/schemas.go` — additive `Subject *SubjectFacts` field (json `subject`, omitempty) on `Facts`. Nil in the account path; populated only in the workload assessment pass. `SubjectFacts` carries the resolved lineage view; `PrincipalFacts.Owner` remains the raw direct-owner reference — distinct views (F3 contract documented in Go doc).
+- `internal/engines/policy_assessment/actions/assess/` — workload assessment pass (`runWorkloadPass`): iterates workloads, resolves ownership chain via injected `LineageResolver` port, writes snapshot via `SnapshotWriter` port, resolves workload → principal, builds `factsForWorkload` (F1: `scope:workload` + `subject:workload`, never `scope:account`), evaluates workload policies via the same dispatcher, records findings keyed to `principal_id`. `targetRef` generalisation preserves account-path `evidence_hash` byte-for-byte (F2).
+- `internal/inventory/findings/model.go` — `KindWorkloadOwnedByTerminated = "workload_owned_by_terminated"` constant.
+- `internal/inventory/policy_evaluation_outcomes/` — `TargetWorkload = "workload"` target type; DB CHECK is `('account','subject','workload','source','pipeline')`.
+- `internal/migrations/20260522100000_workload_lineage_snapshots.go` — additive migration: `workload_lineage_snapshots` table + `(workload_id, chain_hash)` unique constraint + workload_id index.
+- `cartridges/ispm-workload-posture/` — new cartridge bundle with `lifecycle/workload_owned_by_terminated` OPA policy. Tags `["assessment","scope:workload","subject:workload"]` — disjoint from account population by construction (F1). Fires when `input.subject.ownership.terminus == "terminated_human"`; `stack_check.requires: ["subject_linkage","ownership_resolved"]` → `not_evaluable` (Blind Spot) when chain is unowned/broken.
+- Posture-domain vocabulary is **workload** throughout (resolver, facts, facets, finding kind, PEO target type, cartridge id, rego packages). The core-identity cartridge's `nhi_unowned` policy is renamed to `workload_unowned` to match.
+
+#### Findings current-posture tracking (`last_seen_run_id`)
+
+- `internal/inventory/findings/model.go` — new `last_seen_run_id` column: the most recent run that re-confirmed a finding. `assessment_run_id` stays pinned to first detection; the two diverge once a finding survives a re-run. `Repository.TouchLastSeen` advances it (and `evaluated_at`) on the idempotent-reuse path so a finding stays visible to current-posture views across re-runs. `GET /api/v0/findings?last_seen_run_id=` filters on it.
+- `internal/migrations/20260522140000_findings_last_seen_run.go` — adds the column (backfilled from `assessment_run_id`), NOT NULL, indexed.
+- `internal/migrations/20260523100000_nhi_to_workload_rename.go` — renames existing data: PEO `target_type` `nhi`→`workload` (+ CHECK), finding kinds `nhi_owned_by_terminated`→`workload_owned_by_terminated` and `nhi_unowned`→`workload_unowned`.
+
+#### Risk-engine and owner-assignment capabilities
+
+- `internal/engines/risk` — minimal factor-decomposed priority scorer.
+  Pure, deterministic `Score(Input) Scored` turning finding attributes
+  (severity, kind, privilege, MFA, active) into a capped 0..100 score
+  plus the named factor contributions that produced it.
+- `internal/engines/owner_assignment` — minimal owner resolver. Builds
+  an application→owner map from the `applications.owner` column once per
+  run; a finding inherits its account's application owner for routing.
+- Findings gain triage denormalisation, stamped at assess time so a
+  finding is self-describing without joins: `application_id`, `source`,
+  `cartridge_ref`, `owner_ref`, `priority_score`, `priority_factors`
+  (jsonb), plus `recommended_action` + `remediation` sourced from the
+  cartridge finding metadata.
+- `applications` gains a nullable `owner` column (inventory data, not
+  UI-managed config).
+- Findings list API adds `application_id`, `source`, `cartridge`,
+  `owner`, and `exclude_kind` filters; results sort by `priority_score`
+  DESC then `detected_at` DESC.
+- Cartridge manifest parses the `finding` block (`FindingMeta`) and
+  `default_recommendation`.
+
+#### Honest canonical ISPM posture
+
+- `policy_assessment` facts envelope adds `target.account_mfa_enabled`
+  and three not-yet-fed truth-presence keys (`subject_linkage`,
+  `activity_telemetry`, `initiative_state`), all false, so posture
+  policies that need relational/temporal truth surface as honest
+  `not_evaluable` blind spots instead of silently passing.
+
+### Fixed
+
+#### `ispm-core-identity-posture` policies now evaluate honestly
+
+- `privileged_access` no longer falls back to `null` (silent
+  `not_matched`) on an account-level match: its decision object read the
+  optional `input.action` / `input.target.privilege_level` directly, and
+  an undefined reference undefined the whole rule. Now read via
+  `object.get`. Regression-locked in the OPA mechanism test.
+- `mfa_less_privileged` reads observed MFA from `target.account_mfa_enabled`
+  (was the never-populated `input.subject.mfa_enabled`) and is gated by a
+  `stack_check` on `mfa_evidence`.
+- The six data-dependent core policies (orphaned, terminated, dormant,
+  unused, drift, nhi) declare `stack_check` + scoping `tags`, so they
+  emit honest `not_evaluable` blind spots rather than silent passes.
+
 ## [0.6.0] — 2026-05-17
 
 ### Added
@@ -17,7 +125,7 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   `external_id` + `payload.full_name`, upserts the `persons` table
   directly via `ctx.Tx`. Wires `dataset_type=person` end-to-end
   through `inventory_import` (added to the dataset whitelist) so
-  the Lens CSV demo can hit it synchronously.
+  a synchronous CSV import can hit it in one request.
 - Registered in `cmd/backplane/main.go` alongside the other
   normalize actions.
 
@@ -102,7 +210,7 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 #### `engines/access_generate` — generative observer skeleton (`internal/engines/access_generate/`)
 
 - Single entry point `Engine.Recompute(ctx, principalID, RecomputeFilter)`.
-  Every trigger (Journey pipeline action, beat-scheduled pass,
+  Every trigger (orchestrator pipeline action, beat-scheduled pass,
   ad-hoc REST call) reduces to a Recompute call. `RecomputeFilter`
   narrows scope by application_id / capability_id; empty filter
   rebuilds the whole (principal, ∀ apps, ∀ capabilities) scope.
