@@ -222,7 +222,7 @@ func run(log *slog.Logger) error {
 	lineageRepo := workload_lineage.NewBunRepository(db)
 	lineageResolver := workload_lineage.NewResolver(
 		workerLineageWorkloadAdapter{repo: wlsRepo},
-		workerLineageEmploymentAdapter{repo: empsRepo},
+		workerLineageEmploymentAdapter{repo: empsRepo, orgUnits: org_units.NewBunRepository(db, nil)},
 		workerLineagePersonAdapter{repo: personsRepo},
 	)
 
@@ -390,7 +390,10 @@ func (a workerLineageWorkloadAdapter) GetByID(ctx context.Context, id uuid.UUID)
 }
 
 // workerLineageEmploymentAdapter maps employments.Repository → workload_lineage.EmploymentReader.
-type workerLineageEmploymentAdapter struct{ repo employments.Repository }
+type workerLineageEmploymentAdapter struct {
+	repo     employments.Repository
+	orgUnits org_units.Repository
+}
 
 func (a workerLineageEmploymentAdapter) GetByID(ctx context.Context, id uuid.UUID) (*workload_lineage.EmploymentRef, error) {
 	e, err := a.repo.GetByID(ctx, id)
@@ -406,6 +409,8 @@ func (a workerLineageEmploymentAdapter) GetByID(ctx context.Context, id uuid.UUI
 		Code:      e.Code,
 		StartDate: e.StartDate,
 		EndDate:   e.EndDate,
+		Title:     derefStr(e.Description),
+		OrgUnit:   a.orgUnitName(ctx, e.OrgUnitID),
 	}, nil
 }
 
@@ -422,9 +427,33 @@ func (a workerLineageEmploymentAdapter) ListByPerson(ctx context.Context, person
 			Code:      e.Code,
 			StartDate: e.StartDate,
 			EndDate:   e.EndDate,
+			Title:     derefStr(e.Description),
 		}
 	}
 	return out, nil
+}
+
+// orgUnitName resolves an org-unit id to its display name, best-effort.
+func (a workerLineageEmploymentAdapter) orgUnitName(ctx context.Context, id *uuid.UUID) string {
+	if id == nil || a.orgUnits == nil {
+		return ""
+	}
+	u, err := a.orgUnits.GetByID(ctx, *id)
+	if err != nil || u == nil {
+		return ""
+	}
+	if u.DisplayName != "" {
+		return u.DisplayName
+	}
+	return u.Name
+}
+
+// derefStr returns the pointed-to string, or "" for a nil pointer.
+func derefStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // workerLineagePersonAdapter maps persons.Repository → workload_lineage.PersonReader.

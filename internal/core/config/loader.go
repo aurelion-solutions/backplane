@@ -35,11 +35,16 @@ func Load(sm secretmanagers.Manager) (*Settings, error) {
 	if err != nil {
 		return nil, err
 	}
+	llmCfg, err := loadLLM(sm)
+	if err != nil {
+		return nil, err
+	}
 	return &Settings{
 		Postgres:   pg,
 		RabbitMQ:   rmq,
 		App:        app,
 		Cartridges: cart,
+		LLM:        llmCfg,
 	}, nil
 }
 

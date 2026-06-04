@@ -21,6 +21,7 @@ import (
 type Repository interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*EvidenceChain, error)
 	GetByChainHash(ctx context.Context, hash string) (*EvidenceChain, error)
+	ListByFinding(ctx context.Context, findingID uuid.UUID) ([]*EvidenceChain, error)
 	Insert(ctx context.Context, c *EvidenceChain) (inserted bool, err error)
 }
 
@@ -58,6 +59,21 @@ func (r *BunRepository) GetByChainHash(ctx context.Context, hash string) (*Evide
 		return nil, err
 	}
 	return row, nil
+}
+
+// ListByFinding returns every chain row anchored to one finding,
+// oldest first.
+func (r *BunRepository) ListByFinding(ctx context.Context, findingID uuid.UUID) ([]*EvidenceChain, error) {
+	var rows []*EvidenceChain
+	err := r.db.NewSelect().
+		Model(&rows).
+		Where("finding_id = ?", findingID).
+		Order("created_at ASC").
+		Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // Insert appends a chain row, ignoring the conflict when chain_hash

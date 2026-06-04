@@ -1,6 +1,6 @@
 .PHONY: tidy fmt vet build run run-all test check clean migrate-init migrate-up migrate-down migrate-status
 
-CMDS := backplane worker ingester pdp log-siem-transmitter log-dev-projector migrate
+CMDS := backplane worker ingester pdp inference-gateway log-siem-transmitter log-dev-projector migrate
 
 tidy:
 	go mod tidy
@@ -29,7 +29,7 @@ run-all: build
 	@trap 'kill 0' SIGINT SIGTERM
 	export AURELION_INGESTER_INSTANCE_ID=$${AURELION_INGESTER_INSTANCE_ID:-ingester-dev}
 	export AURELION_PDP_INSTANCE_ID=$${AURELION_PDP_INSTANCE_ID:-pdp-dev}
-	for c in backplane worker ingester pdp log-siem-transmitter log-dev-projector; do \
+	for c in backplane worker ingester pdp inference-gateway log-siem-transmitter log-dev-projector; do \
 		echo "→ starting $$c"; \
 		./bin/$$c & \
 	done

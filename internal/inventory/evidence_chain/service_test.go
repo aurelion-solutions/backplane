@@ -34,6 +34,16 @@ func (f *fakeRepo) GetByChainHash(_ context.Context, hash string) (*EvidenceChai
 	return nil, ErrNotFound
 }
 
+func (f *fakeRepo) ListByFinding(_ context.Context, findingID uuid.UUID) ([]*EvidenceChain, error) {
+	var out []*EvidenceChain
+	for _, c := range f.byHash {
+		if c.FindingID != nil && *c.FindingID == findingID {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeRepo) Insert(_ context.Context, c *EvidenceChain) (bool, error) {
 	if _, ok := f.byHash[c.ChainHash]; ok {
 		return false, nil

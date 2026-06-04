@@ -45,26 +45,56 @@ worrying about a leaked goroutine on the provider side.
 
 ## Providers
 
-| Name | File | Status |
-|---|---|---|
-| `anthropic` | `anthropic.go` | stub |
-| `openai` | `openai.go` | stub |
-| `llamacpp` | `llamacpp.go` | stub |
+## Protocols, not brands
 
-Stubs embed `Stub{}` — `Stream` returns `ErrNotImplemented`.
+A backend is sorted by its **wire protocol**, not its brand. One
+protocol is one client; a brand (qwen-local, deepseek, claude…) is a
+named config entry pointing at a protocol plus its endpoint. The
+OpenAI-compatible client alone covers the local llama-server, OpenAI,
+DeepSeek and Mistral — they differ only by `base_url` / `api_key` /
+`model`.
+
+| Protocol | Client | File | Speaks for | Status |
+|---|---|---|---|---|
+| `openai` | `OpenAICompat` | `openai.go` | llama-server (Qwen), OpenAI, DeepSeek, Mistral… | implemented (HTTP+SSE) |
+| `anthropic` | `Anthropic` | `anthropic.go` | Claude | implemented (HTTP+SSE) |
+| `gemini` | `Gemini` | `gemini.go` | Google Gemini | implemented (HTTP+SSE) |
+
+All three clients stream over HTTP+SSE — one terminal `Chunk` with the
+assembled output, even on context cancellation. `OpenAICompat` hits
+`/chat/completions`; `Anthropic` hits `/v1/messages` (system is a
+top-level field, not a message); `Gemini` hits
+`…/models/{model}:streamGenerateContent` (roles `user`/`model`, a
+`systemInstruction`). `Stub` remains the embed-able no-op for a future
+not-yet-written protocol — `Stream` returns `ErrNotImplemented`; the
+`Config` is already threaded through every constructor.
+
+## Config
+
+Named backends live in `config.LLM` (secret key `llm`): a `provider`
+naming the active entry, and a `providers` map of name →
+`{protocol, base_url, api_key, model}`. The factory is keyed by
+protocol; the chosen name resolves to a protocol + `Config`.
 
 ## Factory
 
 ```go
 lf := llm.NewFactory()
-llm.RegisterAnthropic(lf)
 llm.RegisterOpenAI(lf)
-llm.RegisterLlamaCpp(lf)
-provider, err := lf.Get(settings.LLM.Provider)
+llm.RegisterAnthropic(lf)
+llm.RegisterGemini(lf)
+
+active, err := settings.LLM.Active()        // resolve the named entry
+provider, err := lf.Get(active.Protocol, llm.Config{
+    BaseURL: active.BaseURL,
+    APIKey:  active.APIKey,
+    Model:   active.Model,
+})
 ```
 
-Safe for concurrent use. Coarser-grained than per-model caching —
-one provider per backend name; model selection lives in `params`.
+Safe for concurrent use. Keyed by protocol — one client per wire
+format, reused across brands via `Config`. Model selection lives in
+`Config.Model` (and may be overridden per call in `params`).
 
 ## Errors
 

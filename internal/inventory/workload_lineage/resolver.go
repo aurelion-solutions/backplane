@@ -79,11 +79,16 @@ func (r *Resolver) Resolve(ctx context.Context, workloadID uuid.UUID) (Ownership
 	}
 
 	empTerminated := !emp.IsActiveAt(now)
+	empStart := emp.StartDate
 	chain.Links = append(chain.Links, ChainLink{
 		Kind:       "employment",
 		RefID:      emp.ID.String(),
+		Label:      emp.Code,
 		Terminated: empTerminated,
 		EndDate:    emp.EndDate,
+		Title:      emp.Title,
+		StartDate:  &empStart,
+		OrgUnit:    emp.OrgUnit,
 	})
 
 	if len(chain.Links) >= maxChainDepth {

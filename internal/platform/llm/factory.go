@@ -10,12 +10,23 @@ import (
 	"sync"
 )
 
-// Constructor builds a Provider. Provider registrations supply one.
-type Constructor func() (Provider, error)
+// Config carries the endpoint coordinates a protocol client needs to
+// reach one backend. The same client serves many named backends — only
+// these values differ between, say, a local llama-server and OpenAI.
+type Config struct {
+	BaseURL string
+	APIKey  string
+	Model   string
+}
 
-// Factory is a registry of named Provider constructors. Mirrors
-// kernel's LLMFactory (without the per-model LRU caching — providers
-// here are coarser-grained, one per backend name).
+// Constructor builds a Provider for one protocol from a Config.
+type Constructor func(Config) (Provider, error)
+
+// Factory is a registry of Provider constructors keyed by wire protocol
+// ("openai" | "anthropic" | "gemini"). A brand (qwen-local, deepseek,
+// claude…) is not a registry entry — it is a Config handed to the
+// protocol's constructor. One client per protocol, reused across
+// brands.
 //
 // Safe for concurrent use.
 type Factory struct {
@@ -28,25 +39,27 @@ func NewFactory() *Factory {
 	return &Factory{ctors: make(map[string]Constructor)}
 }
 
-// Register stores ctor under name. Overwrites any prior registration.
-func (f *Factory) Register(name string, ctor Constructor) {
+// Register stores ctor under a protocol name. Overwrites any prior
+// registration.
+func (f *Factory) Register(protocol string, ctor Constructor) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.ctors[name] = ctor
+	f.ctors[protocol] = ctor
 }
 
-// Get constructs a fresh Provider for the named backend.
-func (f *Factory) Get(name string) (Provider, error) {
+// Get constructs a fresh Provider for the given protocol, configured by
+// cfg.
+func (f *Factory) Get(protocol string, cfg Config) (Provider, error) {
 	f.mu.RLock()
-	ctor, ok := f.ctors[name]
+	ctor, ok := f.ctors[protocol]
 	f.mu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("llm: provider %q is not registered (known: %v)", name, f.Names())
+		return nil, fmt.Errorf("llm: protocol %q is not registered (known: %v)", protocol, f.Names())
 	}
-	return ctor()
+	return ctor(cfg)
 }
 
-// Names returns the registered provider names in sorted order.
+// Names returns the registered protocol names in sorted order.
 func (f *Factory) Names() []string {
 	f.mu.RLock()
 	defer f.mu.RUnlock()

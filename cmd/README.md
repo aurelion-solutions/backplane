@@ -10,6 +10,7 @@ via the secret manager, wire infra, then start its loop.
 | [`worker`](worker/) | Orchestrator runner — claims pending pipeline runs and executes step actions. |
 | [`ingester`](ingester/) | Lake-stream worker — consumes `aurelion.ingest`, anti-joins, writes the lake. |
 | [`pdp`](pdp/) | Policy Decision Point — AuthZ / AuthN request/response host. |
+| [`inference-gateway`](inference-gateway/) | The single network entry point for LLM inference — callers stream through it; a GPU worker pool slots in behind the same contract later. |
 | [`migrate`](migrate/) | One-shot Bun migration runner (`init` / `up` / `down` / `status`). |
 | [`log-siem-transmitter`](log-siem-transmitter/) | Bridges `aurelion.logs` to a SIEM sink. |
 | [`log-dev-projector`](log-dev-projector/) | Dev-only in-memory log buffer with an HTTP view. |

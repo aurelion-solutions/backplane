@@ -36,6 +36,11 @@ type ChainLink struct {
 	Label      string     `json:"label,omitempty"`
 	Terminated bool       `json:"terminated"`
 	EndDate    *time.Time `json:"end_date,omitempty"`
+	// Title, StartDate and OrgUnit are populated for the "employment"
+	// link so the UI can render the role period instead of an opaque id.
+	Title     string     `json:"title,omitempty"`
+	StartDate *time.Time `json:"start_date,omitempty"`
+	OrgUnit   string     `json:"org_unit,omitempty"`
 }
 
 // OwnershipChain is the resolved ownership chain for one workload.

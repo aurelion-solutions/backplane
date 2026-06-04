@@ -33,6 +33,11 @@ type EmploymentRef struct {
 	Code      string
 	StartDate time.Time
 	EndDate   *time.Time
+	// Title is the job title (employment description); OrgUnit is the
+	// resolved org-unit display name. Both are best-effort and may be
+	// empty. They decorate the employment link in the ownership chain.
+	Title   string
+	OrgUnit string
 }
 
 // IsActiveAt reports whether the employment is active on date d.

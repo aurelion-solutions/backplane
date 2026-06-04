@@ -5,7 +5,104 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.8.0] — 2026-06-04
+
+### Added
+
+#### External evidence projection (compliance control mapping)
+
+- `internal/engines/compliance_projection/` — new L2 engine that projects identity-posture findings onto external compliance control languages. **A projection is a view over a single assessment run, never a source of truth, and carries no policies of its own** — it reads a declarative projection definition from a cartridge (control → the finding kinds that violate it) and rolls the run's existing findings and policy-evaluation outcomes up into per-control coverage. Computation is read-time; nothing is persisted (no table, no migration).
+- **Coverage is honest about what cannot be proven.** A control is `covered` only on positive evidence — its population was evaluated and produced neither a violation nor a gap. `failed` = a violation with no gap; `partial` = a violation and a gap; `not_evaluable` = a gap with no violation, or a population no rule reached. Blind spots are attributed precisely via `rule_id → finding.kind` read from cartridge manifests, never guessed.
+- `GET /api/v0/policy-assessment-runs/:id/projections` (frameworks available for the run + coverage roll-up), `.../projections/:projection` (per-control coverage table), `.../projections/:projection/controls/:controlID` (one control: state + supporting findings + blind spots), `.../projections/:projection/packet` (evidence packet; `?format=csv` for working papers). All read-only — every endpoint recomputes from the run.
+- Projection cartridges carry a single `projection.json` at their root and **no** `policies/` directory; enabling another projection is dropping another cartridge, with no engine change. The bundled `ispm-soc2-logical-access` cartridge maps the SOC 2 Common Criteria for logical access (CC6.1–CC6.8) onto existing posture / credential / consent / workload finding kinds. The packet carries a disclaimer; the engine asserts no audit opinion.
+- Additional projection cartridges ship as pure mappings (zero engine change), each declaring its `type` so consumers can keep the external-language shelves distinct: `ispm-nist-800-53-access` (`control_catalog` — AC/IA families), `ispm-iso-27001-access` (`certifiable_standard` — Annex A / 27002 access controls), `ispm-cis-controls-access` (`prescriptive_baseline` — Controls 5/6/15). An attestation (SOC 2) is not the same kind of artifact as a control catalog / standard / baseline; the `type` field carries the distinction.
+
+#### Finding explanation (domain engine)
+
+- `internal/engines/finding_explanation/` — new L2 engine that turns an
+  already-proven finding into a human-readable narrative. **It explains
+  findings; it never creates them.** The finding, severity, evidence
+  chain and policy are decided upstream; this engine only packages those
+  facts into prose. The deterministic boundary is enforced: it collects
+  the finding + evidence chain + policy into labelled references, renders
+  a prompt that requires every claim to cite a label, calls the model
+  through the inference-gateway port, then **drops any citation whose
+  label was not in the input** — the model cannot anchor a claim to
+  something it was not given, and cannot mint a finding, score, severity
+  or remediation.
+- The explanation is a **persisted, cited artifact** (unlike the
+  read-time compliance projection): generation is expensive, so it is
+  cached and reused. Cache key is `input_hash`, a digest over the prompt
+  inputs (finding + evidence refs + policy + template version +
+  provider); a change in any of them invalidates. A `failed` artifact is
+  a generation failure, never a finding failure — the finding stays
+  deterministic.
+- `internal/migrations/20260604120000_finding_explanations.go` —
+  `finding_explanations` table (FK to `findings` ON DELETE CASCADE,
+  status CHECK, `UNIQUE (finding_id, input_hash)` cache key, finding /
+  run indexes).
+- HTTP surface: `POST /findings/:id/explanations` (generate or reuse),
+  `GET /findings/:id/explanations/latest`, `GET /explanation-jobs/:id`,
+  wired into the backplane composition root. Model execution reaches
+  `cmd/inference-gateway` through the `InferenceClient` port —
+  `GatewayClient` (HTTP+SSE to the gateway, assembles the stream into one
+  result) is the production implementation; the engine wires no provider
+  of its own. Gateway address is `config.LLM.GatewayURL`
+  (`gateway_url`, default `http://localhost:8090`).
+- `internal/inventory/evidence_chain/` — `Repository` gains
+  `ListByFinding` so an explanation can read the evidence a finding rests
+  on.
+
+#### Inference gateway
+
+- `cmd/inference-gateway/` — new binary: the single network entry point
+  for LLM inference. Callers (backplane, worker, pdp) reach a model
+  through this process, never through an in-process provider of their
+  own — GPU concerns never leak into the API binaries. HTTP surface:
+  `POST /v1/inference/stream` (Server-Sent Events token stream) and
+  `GET /healthz` (active backend metadata). Boots like every other
+  binary (secret manager → config) and needs no Postgres / RabbitMQ /
+  cartridges — it is pure transport over the `llm` platform.
+- Inside, an `Executor` is the swap point: today one `LocalExecutor`
+  resolves the requested named backend to a protocol + `Config` and
+  streams in-process via `internal/platform/llm`. A `DistributedExecutor`
+  fanning out to a tagged inference-worker pool slots in behind the same
+  HTTP contract when GPU slots need scaling — gateway-first, workers
+  later, no caller change. Default bind `:8090`
+  (`AURELION_INFERENCE_GATEWAY_HTTP_ADDR`).
+
+### Changed
+
+#### LLM provider factory — sorted by wire protocol, configured centrally
+
+- `internal/platform/llm/` factory is now keyed by **wire protocol**, not
+  brand. One protocol is one client; a brand (qwen-local, deepseek,
+  claude…) is a named config entry pointing at a protocol plus its
+  endpoint. The OpenAI-compatible client (`openai.go`, `OpenAICompat`)
+  alone serves the local llama-server (Qwen), OpenAI, DeepSeek and
+  Mistral — they differ only by base URL / key / model. `anthropic` and
+  `gemini` get their own clients. `Constructor` and `Factory.Get` now
+  take a `Config{BaseURL, APIKey, Model}`; the chosen named entry
+  resolves to a protocol + `Config`.
+- `internal/core/config/llm.go` — new `LLM` config section (secret key
+  `llm`): a `provider` naming the active entry and a `providers` map of
+  name → `{protocol, base_url, api_key, model}`. Optional — absent
+  config defaults to a local llama-server (`qwen-local`, OpenAI
+  protocol) so on-prem data never leaves the perimeter.
+  `.secrets.example.json` carries qwen-local / openai / deepseek /
+  claude / gemini examples.
+- `internal/platform/llm/llamacpp.go` removed; the local model is served
+  by the OpenAI-compatible client pointed at a self-hosted llama-server
+  (not Ollama), so a separate llama.cpp client is unnecessary.
+  `internal/platform/llm/gemini.go` added.
+- All three protocol clients are now real HTTP+SSE streamers, each on
+  its own wire format: `OpenAICompat` (`/chat/completions`), `Anthropic`
+  (`/v1/messages`, system as a top-level field, `anthropic-version`
+  header), `Gemini` (`…/models/{model}:streamGenerateContent`, roles
+  `user`/`model`, `systemInstruction`). Each emits one terminal `Chunk`
+  with assembled output even on context cancellation. `Stub` stays as the
+  embed-able no-op for a future protocol. `config.LLM` gains
+  `gateway_url` for callers to reach the inference-gateway.
 
 ## [0.7.0] — 2026-05-26
 

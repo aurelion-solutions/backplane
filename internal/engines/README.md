@@ -11,14 +11,30 @@ end-to-end: its models, persistence, service logic, REST surface, and
 the events it emits. Engines are reusable — the same engine is
 consumed by IGA, IDP, future PAM, etc. They are not product-specific.
 
+**Inventory pipeline** — raw records into governed domain state:
+
 | Engine | Role |
 |---|---|
-| [inventory_ingest](inventory_ingest/) | Receives raw records, hashes them, dedupes against current lake state, writes only changed revisions to the lake. |
-| [inventory_discover](inventory_discover/) | Orchestrates a pull: tells a connector to start discovery and tracks the run until it completes. |
+| [inventory_discover](inventory_discover/) | Orchestrates a pull: tells a connector to start discovery and tracks the run until it completes. Does not touch the lake itself. |
+| [inventory_ingest](inventory_ingest/) | The single writer into the data lake. Hashes each record, dedupes against the latest revision per external_id, writes only what changed, emits `inventory.ingest.batch_received`. |
+| [inventory_normalize](inventory_normalize/) | Not a standalone engine — a package of orchestrator actions the worker runs to turn a raw lake batch into domain entities (accounts, employments, …). |
+| [inventory_import](inventory_import/) | Synchronous CSV-import façade: runs ingest + normalize for one dataset in a single request inside one transaction. |
 
-The inventory chain will continue with `inventory_normalize`,
-`inventory_reconcile`, and `inventory_apply` — but those are not
-written yet; they will live in this directory when they are.
+**Access** — what a principal should hold:
+
+| Engine | Role |
+|---|---|
+| [access_generate](access_generate/) | Computes the initiatives a principal *should* hold by projecting structural state (employment, OU), ITSM requests, and delegations through cartridge rules; writes `desired_state`. |
+
+**Assessment** — turning state into findings and narratives:
+
+| Engine | Role |
+|---|---|
+| [policy_assessment](policy_assessment/) | The single dispatcher every caller goes through to evaluate one or many policies; N mechanism handlers (cedar, sod, llm_classification, …) each own one class of evaluation. |
+| [risk](risk/) | Deterministic 0..100 priority scoring, factor-decomposed so every score is explainable without any model or AI. |
+| [owner_assignment](owner_assignment/) | Resolves a finding's accountable owner from its account's application (ownership carried as inventory data, resolved in-memory per run). |
+| [compliance_projection](compliance_projection/) | Read-time view that rolls an assessment run's existing findings up onto external compliance control languages (SOC 2 logical access, …); persists nothing. |
+| [finding_explanation](finding_explanation/) | Turns an already-proven finding into a cited, human-readable narrative via the inference gateway. Explains findings; never creates them. |
 
 ## Rules every engine follows
 

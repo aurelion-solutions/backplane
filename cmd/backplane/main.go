@@ -49,6 +49,8 @@ import (
 	"github.com/aurelion-solutions/backplane/internal/core/webserver"
 	"github.com/aurelion-solutions/backplane/internal/engines/access_generate"
 	access_generate_run "github.com/aurelion-solutions/backplane/internal/engines/access_generate/actions/run"
+	"github.com/aurelion-solutions/backplane/internal/engines/compliance_projection"
+	"github.com/aurelion-solutions/backplane/internal/engines/finding_explanation"
 	"github.com/aurelion-solutions/backplane/internal/engines/inventory_discover"
 	"github.com/aurelion-solutions/backplane/internal/engines/inventory_import"
 	"github.com/aurelion-solutions/backplane/internal/engines/inventory_ingest"
@@ -98,7 +100,6 @@ const (
 	httpAddr        = ":8000"
 	logLevel        = "info"
 	storageProvider = "file"
-	llmProvider     = "llamacpp"
 )
 
 var siemProviders = []string{"file", "stdout"}
@@ -286,15 +287,27 @@ func run(log *slog.Logger) error {
 	)
 
 	llf := llm.NewFactory()
-	llm.RegisterLlamaCpp(llf)
-	llm.RegisterAnthropic(llf)
 	llm.RegisterOpenAI(llf)
-	llmClient, err := llf.Get(llmProvider)
+	llm.RegisterAnthropic(llf)
+	llm.RegisterGemini(llf)
+	llmActive, err := settings.LLM.Active()
+	if err != nil {
+		return err
+	}
+	llmClient, err := llf.Get(llmActive.Protocol, llm.Config{
+		BaseURL: llmActive.BaseURL,
+		APIKey:  llmActive.APIKey,
+		Model:   llmActive.Model,
+	})
 	if err != nil {
 		return err
 	}
 	_ = llmClient
-	log.Info("llm selected", slog.String("provider", llmProvider))
+	log.Info("llm selected",
+		slog.String("provider", settings.LLM.Provider),
+		slog.String("protocol", llmActive.Protocol),
+		slog.String("model", llmActive.Model),
+	)
 
 	rpc := rabbitmq.NewRPCClient(mq.Conn, rabbitmq.RPCClientConfig{
 		ResponsesExchange: settings.RabbitMQ.ConnectorResponsesExchange,
@@ -539,6 +552,23 @@ func run(log *slog.Logger) error {
 	policyOutcomesRepo := policy_evaluation_outcomes.NewBunRepository(db)
 	evidenceChainRepo := evidence_chain.NewBunRepository(db)
 
+	complianceProjectionSvc, err := compliance_projection.NewService(
+		cartridgesProvider, findingsRepo, policyOutcomesRepo, assessmentRunsRepo,
+	)
+	if err != nil {
+		return fmt.Errorf("compliance_projection service: %w", err)
+	}
+
+	// finding_explanation reaches the model only through the
+	// inference-gateway process — never an in-process provider.
+	findingExplanationSvc := finding_explanation.NewService(finding_explanation.Deps{
+		Findings:  findingsRepo,
+		Evidence:  evidenceChainRepo,
+		Inference: finding_explanation.NewGatewayClient(settings.LLM.GatewayURL, nil),
+		Repo:      finding_explanation.NewBunRepository(db),
+		Log:       log,
+	})
+
 	policiesSync := core_policies.New(core_policies.Deps{
 		Provider: cartridgesProvider,
 		Repo:     policiesRepo,
@@ -574,6 +604,8 @@ func run(log *slog.Logger) error {
 	findings.RegisterRoutes(apiV0, findingsRepo)
 	policy_evaluation_outcomes.RegisterRoutes(apiV0, policyOutcomesRepo)
 	evidence_chain.RegisterRoutes(apiV0, evidenceChainRepo)
+	compliance_projection.RegisterRoutes(apiV0, complianceProjectionSvc)
+	finding_explanation.RegisterRoutes(apiV0, findingExplanationSvc)
 	orchestrator.RegisterWellKnownRoutes(e, actionReg)
 	applications.RegisterRoutes(apiV0, appsSvc, matchingAdapter{svc: connSvc})
 	connectors.RegisterRoutes(apiV0, connSvc)
@@ -592,7 +624,7 @@ func run(log *slog.Logger) error {
 	// Lineage resolver: read-only; NO snapshot writer passed here (R1).
 	lineageResolver := workload_lineage.NewResolver(
 		wlLineageWorkloadAdapter{repo: wlsRepo},
-		wlLineageEmploymentAdapter{repo: empsRepo},
+		wlLineageEmploymentAdapter{repo: empsRepo, orgUnits: orgUnitsRepo},
 		wlLineagePersonAdapter{repo: personsRepo},
 	)
 	workload_lineage.RegisterRoutes(apiV0, lineageResolver)
@@ -644,6 +676,14 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// deref returns the pointed-to string, or "" for a nil pointer.
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // -------- Cross-slice adapters --------
@@ -884,7 +924,10 @@ func (a wlLineageWorkloadAdapter) GetByID(ctx context.Context, id uuid.UUID) (*w
 	}, nil
 }
 
-type wlLineageEmploymentAdapter struct{ repo employments.Repository }
+type wlLineageEmploymentAdapter struct {
+	repo     employments.Repository
+	orgUnits org_units.Repository
+}
 
 func (a wlLineageEmploymentAdapter) GetByID(ctx context.Context, id uuid.UUID) (*workload_lineage.EmploymentRef, error) {
 	e, err := a.repo.GetByID(ctx, id)
@@ -900,6 +943,8 @@ func (a wlLineageEmploymentAdapter) GetByID(ctx context.Context, id uuid.UUID) (
 		Code:      e.Code,
 		StartDate: e.StartDate,
 		EndDate:   e.EndDate,
+		Title:     deref(e.Description),
+		OrgUnit:   a.orgUnitName(ctx, e.OrgUnitID),
 	}, nil
 }
 
@@ -908,6 +953,9 @@ func (a wlLineageEmploymentAdapter) ListByPerson(ctx context.Context, personID u
 	if err != nil {
 		return nil, err
 	}
+	// Title is free (already loaded); OrgUnit is skipped here to avoid an
+	// N+1 lookup — this list only feeds the person-termination calc, whose
+	// links are not rendered with org-unit detail.
 	out := make([]*workload_lineage.EmploymentRef, len(emps))
 	for i, e := range emps {
 		out[i] = &workload_lineage.EmploymentRef{
@@ -916,9 +964,27 @@ func (a wlLineageEmploymentAdapter) ListByPerson(ctx context.Context, personID u
 			Code:      e.Code,
 			StartDate: e.StartDate,
 			EndDate:   e.EndDate,
+			Title:     deref(e.Description),
 		}
 	}
 	return out, nil
+}
+
+// orgUnitName resolves an org-unit id to its display name, best-effort.
+// A missing unit or lookup error yields an empty string — the chain still
+// renders, just without the org-unit decoration.
+func (a wlLineageEmploymentAdapter) orgUnitName(ctx context.Context, id *uuid.UUID) string {
+	if id == nil || a.orgUnits == nil {
+		return ""
+	}
+	u, err := a.orgUnits.GetByID(ctx, *id)
+	if err != nil || u == nil {
+		return ""
+	}
+	if u.DisplayName != "" {
+		return u.DisplayName
+	}
+	return u.Name
 }
 
 type wlLineagePersonAdapter struct{ repo persons.Repository }

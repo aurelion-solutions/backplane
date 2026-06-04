@@ -28,4 +28,5 @@ type Settings struct {
 	RabbitMQ   RabbitMQ
 	App        App
 	Cartridges Cartridges
+	LLM        LLM
 }
